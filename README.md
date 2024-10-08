@@ -2,10 +2,11 @@
 ![Fancy logo](./banner-light.png#gh-light-mode-only)
 
 # TinyStorage 
+<a href="https://www.emergetools.com/app/example/ios/examp_uQbTBp6Z4ryC/manual"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fwww.emergetools.com%2Fapi%2Fv2%2Fpublic_new_build%3FexampleId%3Dexamp_uQbTBp6Z4ryC%26platform%3Dios%26badgeOption%3Dversion_and_max_install_size&query=$.badgeMetadata&label=TinyStorage&logo=apple" /></a>
 
 A simple, lightweight replacement for `UserDefaults` with more reliable access and native support for `Codable` types.
 
-# Overview
+## Overview
 
 Born out of [encountering issues with `UserDefaults`](https://christianselig.com/2024/10/beware-userdefaults/). As that blog post discusses, `UserDefaults` has more and more issues as of late with returning nil data when the device is locked and iOS "prelaunches" your app, leaving me honestly sort of unable to trust what `UserDefaults` returns. Combined with an API that doesn't really surface this information well, you can quite easily find yourself in a situation with difficult to track down bugs and data loss. This library seeks to address that fundamentally by not encrypting the backing file, allowing more reliable access to your saved data (if less secure, so don't store sensitive data), with some niceties sprinkled on top.
 
@@ -17,7 +18,7 @@ This reliable storing of small, non-sensitive data (to me) is what `UserDefaults
 
 (Also to be clear, `TinyStorage` is not a wrapper for `UserDefaults`, it is a full replacement. It does not interface with the `UserDefaults` system in any way.)
 
-# Features
+## Features
 
 - Reliable access: even on first reboot or in application prewarming states, `TinyStorage` will read and write data properly
 - Read and write Swift `Codable` types easily with the API
@@ -31,15 +32,15 @@ This reliable storing of small, non-sensitive data (to me) is what `UserDefaults
 - Uses `OSLog` for logging
 - A function to migrate your `UserDefaults` instance to `TinyStorage`
 
-# Limitations
+## Limitations
 
 Unlike `UserDefaults`, `TinyStorage` does not support mixed collections, so if you have a bunch of strings, dates, and integers all in the same array in `UserDefaults` without boxing them in a shared type, `TinyStorage` won't work. Same situation with dictionaries, you can use them fine with `TinyStorage` but the key and value must both be a `Codable` type, so you can't use `[String: Any]` for instance where each string key could hold a different type of value.
 
-# Installation
+## Installation
 
 Simply add a **Swift Package Manager** dependency for https://github.com/christianselig/TinyStorage.git
 
-# Usage
+## Usage
 
 First, either initialize an instance of `TinyStorage` or create a singleton and choose where you want the file on disk to live. To keep with `UserDefaults` convention I normally create a singleton for the app container:
 

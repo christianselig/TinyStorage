@@ -10,7 +10,7 @@ let package = Package(
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "TinyStorage",
-            type: .static, // Replace this to build dynamic for xcframework
+type: .dynamic,
             targets: ["TinyStorage"]),
     ],
     dependencies: [],
