@@ -2,7 +2,7 @@
 ![Fancy logo](./banner-light.png#gh-light-mode-only)
 
 # TinyStorage 
-<a href="https://www.emergetools.com/app/example/ios/examp_uQbTBp6Z4ryC/manual"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fwww.emergetools.com%2Fapi%2Fv2%2Fpublic_new_build%3FexampleId%3Dexamp_uQbTBp6Z4ryC%26platform%3Dios%26badgeOption%3Dversion_and_max_install_size&query=$.badgeMetadata&label=TinyStorage&logo=apple" /></a>
+<a href="https://www.emergetools.com/app/example/ios/examp_uQbTBp6Z4ryC/"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fwww.emergetools.com%2Fapi%2Fv2%2Fpublic_new_build%3FexampleId%3Dexamp_uQbTBp6Z4ryC%26platform%3Dios%26badgeOption%3Dversion_and_max_install_size&query=$.badgeMetadata&label=TinyStorage&logo=apple" /></a>
 
 A simple, lightweight replacement for `UserDefaults` with more reliable access and native support for `Codable` types.
 
