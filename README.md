@@ -27,6 +27,7 @@ This reliable storing of small, non-sensitive data (to me) is what `UserDefaults
 - Uses `NSFileCoordinator` for coordinating reading/writing to disk so can be used safely across multiple processes at the same time (main target and widget target, for instance)
 - When using across multiple processes, will automatically detect changes to file on disk and update accordingly
 - SwiftUI property wrapper for easy use in a SwiftUI hierarchy (Similar to `@AppStorage`)
+- Can subscribe to to `TinyStorage.didChangeNotification` in `NotificationCenter`, and includes the key that changed in `userInfo`
 - Uses `OSLog` for logging
 - A function to migrate your `UserDefaults` instance to `TinyStorage`
 
