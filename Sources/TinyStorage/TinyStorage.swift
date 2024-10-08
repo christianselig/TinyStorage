@@ -37,7 +37,7 @@ final class TinyStorage: @unchecked Sendable {
     
     /// All keys currently present in storage
     var allKeys: [any TinyStorageKey] {
-        dispatchQueue.sync { return Array(dictionaryRepresentation.keys) }
+        dispatchQueue.sync { return Array(dictionaryRepresentation.keys) }        
     }
     
     init(insideDirectory: URL) {

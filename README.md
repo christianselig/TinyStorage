@@ -113,3 +113,23 @@ Or better support for optional values:
 @TinyStorageItem(key: "nickname", storage: .appGroup)
 var nickname: String? = nil // or "Cool Guy"
 ```
+
+You can also migrate from a `UserDefaults` instance to `TinyStorage` with a handy helper function:
+
+```swift
+let keysToMigrate = ["favoriteIceCream", "appFontSize", "useCustomTheme", "lastFetchDate"]
+TinyStorage.appGroup.migrate(userDefaults: .standard, keys: keysToMigrate, overwriteIfConflict: true)
+```
+
+(Read the `migrate` function documentation for more details.)
+
+If you want to migrate multiple keys manually or store a bunch of things at once, rather than a bunch of single `store` calls you can consolidate them into one call with `bulkStore` which will only write to disk the once:
+
+```swift
+let item1 = TinyStorageBulkStoreItem(key: AppGroup.pet, value: pet)
+let item2 = TinyStorageBulkStoreItem(key: AppGroup.theme, value: "sunset")
+
+TinyStorage.appGroup.bulkStore(items: [item1, item2])
+```
+
+Happy storage and hope you enjoy!
