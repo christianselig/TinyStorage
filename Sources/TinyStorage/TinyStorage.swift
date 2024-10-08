@@ -237,9 +237,9 @@ final class TinyStorage: @unchecked Sendable {
                         } catch {
                             logger.error("Error encoding Date array to Data so could not migrate \(key): \(error)")
                         }
-                    } else if let dictionaryArray = arrayObject as? [[String: Any]] {
+                    } else if let _ = arrayObject as? [[String: Any]] {
                         logger.warning("Nested collection types (in this case: dictionary inside array) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
-                    } else if let arrayArray = arrayObject as? [[Any]]  {
+                    } else if let _ = arrayObject as? [[Any]]  {
                         logger.warning("Nested collection types (in this case: array inside array) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
                     } else if let dataArray = arrayObject as? [Data] {
                         do {
@@ -289,9 +289,9 @@ final class TinyStorage: @unchecked Sendable {
                         } catch {
                             logger.error("Error encoding Data dictionary to Data so could not migrate \(key): \(error)")
                         }
-                    } else if let dictionaryDictionary = dictionaryObject as? [String: [String: Any]] {
+                    } else if let _ = dictionaryObject as? [String: [String: Any]] {
                         logger.warning("Nested collection types (in this case: dictionary inside dictionary) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
-                    } else if let arrayDictionary = dictionaryObject as? [String: [Any]] {
+                    } else if let _ = dictionaryObject as? [String: [Any]] {
                         logger.warning("Nested collection types (in this case: array inside dictionary) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
                     } else {
                         logger.warning("Mixed dictionary type not supported in TinyStorage so not migrating \(key)")
@@ -522,7 +522,7 @@ final class TinyStorage: @unchecked Sendable {
     }
 }
 
-protocol TinyStorageKey: Hashable {
+protocol TinyStorageKey: Hashable, Sendable {
     var rawValue: String { get }
 }
 
@@ -537,7 +537,7 @@ struct TinyStorageBulkStoreItem {
 }
 
 @propertyWrapper
-struct TinyStorageItem<T: Codable>: DynamicProperty {
+struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable {
     @State private var storage: TinyStorage
     
     private let key: any TinyStorageKey
