@@ -37,7 +37,7 @@ final class TinyStorage: @unchecked Sendable {
     
     /// All keys currently present in storage
     var allKeys: [any TinyStorageKey] {
-        dispatchQueue.sync { return Array(dictionaryRepresentation.keys) }        
+        dispatchQueue.sync { return Array(dictionaryRepresentation.keys) }
     }
     
     init(insideDirectory: URL) {
@@ -173,6 +173,15 @@ final class TinyStorage: @unchecked Sendable {
     func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteIfConflict: Bool) {
         dispatchQueue.sync {
             for key in keys {
+                if dictionaryRepresentation[key] != nil {
+                    if overwriteIfConflict {
+                        logger.info("Preparing to overwrite existing key \(key) during migration due to UserDefaults having the same key")
+                    } else {
+                        logger.info("Skipping key \(key) during migration due to UserDefaults having the same key and overwriting is disabled")
+                        continue
+                    }
+                }
+                
                 guard let object = userDefaults.object(forKey: key) else {
                     logger.warning("Requested migration of \(key) but it was not found in your UserDefaults instance")
                     continue
