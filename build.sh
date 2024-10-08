@@ -36,10 +36,6 @@ build_framework() {
     "$FRAMEWORK_MODULES_PATH/$scheme.swiftmodule"
     # Delete private swiftinterface
     rm -f "$FRAMEWORK_MODULES_PATH/$scheme.swiftmodule/*.private.swiftinterface"
-    find "$FRAMEWORK_MODULES_PATH/$scheme.swiftmodule" -type f -name "*.swiftinterface" | while read -r file; do
-      # Remove lines containing "NSInvocation"
-      sed -e '/NSInvocation/d' -e 's/XCTest\.//g' "$file" > temp && mv temp "$file"
-    done
     mkdir -p "$scheme-$sdk.xcarchive/LinkMaps"
     find "$XCODEBUILD_DERIVED_DATA_PATH" -name "$scheme-LinkMap-*.txt" -exec cp {} "./$scheme-$sdk.xcarchive/LinkMaps/" \;
 }
