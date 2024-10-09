@@ -28,7 +28,7 @@ public final class TinyStorage: @unchecked Sendable {
     private var dictionaryRepresentation: [String: Data]
     
     /// Coordinates access to in-memory store
-    private let dispatchQueue = DispatchQueue(label: "TinyStorageInMemory")
+    private let dispatchQueue = DispatchQueue(label: "TinyStorageInMemory", attributes: .concurrent)
     
     private var source: DispatchSourceFileSystemObject?
     
@@ -98,7 +98,6 @@ public final class TinyStorage: @unchecked Sendable {
         if let value {
             // Encode the Codable object back to Data before storing in memory and on disk
             let valueData: Data
-            
             if let data = value as? Data {
                 // Given value is already of type Data, so use directly
                 valueData = data
@@ -111,19 +110,20 @@ public final class TinyStorage: @unchecked Sendable {
                 }
             }
             
-            dispatchQueue.sync {
-                dictionaryRepresentation[key.rawValue] = valueData
+            dispatchQueue.async(flags: .barrier) {
+                self.dictionaryRepresentation[key.rawValue] = valueData
+                self.storeToDisk()
                 
-                storeToDisk()
+                NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": key.rawValue])
             }
         } else {
-            dispatchQueue.sync {
-                dictionaryRepresentation.removeValue(forKey: key.rawValue)
-                storeToDisk()
+            dispatchQueue.async(flags: .barrier) {
+                self.dictionaryRepresentation.removeValue(forKey: key.rawValue)
+                self.storeToDisk()
+                
+                NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": key.rawValue])
             }
         }
-        
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": key.rawValue])
     }
     
     /// Removes the value for the given key
@@ -133,13 +133,13 @@ public final class TinyStorage: @unchecked Sendable {
     
     /// Completely resets the storage, removing all values
     public func reset() {
-        var keysBeforeReset: Set<String>?
-        
-        let coordinator = NSFileCoordinator()
-        var coordinatorError: NSError?
-        var successfullyRemoved = false
-        
-        dispatchQueue.sync {
+        dispatchQueue.async(flags: .barrier) { [self] in
+            var keysBeforeReset: Set<String>?
+            
+            let coordinator = NSFileCoordinator()
+            var coordinatorError: NSError?
+            var successfullyRemoved = false
+            
             keysBeforeReset = Set(dictionaryRepresentation.keys)
             
             coordinator.coordinate(writingItemAt: fileURL, options: [.forDeleting], error: &coordinatorError) { url in
@@ -151,17 +151,17 @@ public final class TinyStorage: @unchecked Sendable {
                     successfullyRemoved = false
                 }
             }
+            
+            if let coordinatorError {
+                logger.error("Error coordinating storage file removal: \(coordinatorError)")
+                return
+            } else if !successfullyRemoved {
+                logger.error("Unable to remove storage file")
+                return
+            }
+            
+            keysBeforeReset?.forEach { NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": $0]) }
         }
-        
-        if let coordinatorError {
-            logger.error("Error coordinating storage file removal: \(coordinatorError)")
-            return
-        } else if !successfullyRemoved {
-            logger.error("Unable to remove storage file")
-            return
-        }
-        
-        keysBeforeReset?.forEach { NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": $0]) }
     }
     
     /// Migrates `UserDefaults` into this instance of `TinyStorage` and stores to disk.
@@ -179,7 +179,7 @@ public final class TinyStorage: @unchecked Sendable {
     /// 4. This `migrate` function does not support nested collections due to Swift not having any `AnyCodable` type and the complication in supporting deeply nested types. That means `[String: Any]` is fine, provided `Any` is not another array or dictionary. The same applies to Arrays, `[String]` is okay but `[[String]]` is not. This includes arrays of dictionaries. This does not mean `TinyStorage` itself does not support nested collections (it does), however the migrator does not. You are still free to migrate these types manually as a result (in which case look at the `bulkStore` function).
     /// 5. As TinyStorage does not support mixed collection types, neither does this `migrate` function. For instance an array of `[Any]` where `Any` could be a `String` or `Int` is invalid, as is `[String: Any]` where `Any` is not one consistent type.
     public func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteIfConflict: Bool) {
-        dispatchQueue.sync {
+        dispatchQueue.async(flags: .barrier) { [self] in
             for key in keys {
                 guard let object = userDefaults.object(forKey: key) else {
                     logger.warning("Requested migration of \(key) but it was not found in your UserDefaults instance")
@@ -326,7 +326,7 @@ public final class TinyStorage: @unchecked Sendable {
     
     /// Store multiple items at once, which will only result in one disk write, rather than a disk write for each individual storage as would happen if you called `store` on many individual items. Handy during a manual migration.
     public func bulkStore(items: [TinyStorageBulkStoreItem]) {
-        dispatchQueue.sync {
+        dispatchQueue.async(flags: .barrier) { [self] in
             for item in items {
                 let valueData: Data
                 
@@ -351,7 +351,7 @@ public final class TinyStorage: @unchecked Sendable {
     
     /// Store given items at the specified keys if and only if those keys do not already have a value. Handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale. Akin to `registerDefaults` in `UserDefaults`.
     public func storeIfNotAlreadyPresent(items: [TinyStorageBulkStoreItem]) {
-        dispatchQueue.sync {
+        dispatchQueue.async(flags: .barrier) { [self] in
             for item in items {
                 // Skip if already present
                 guard dictionaryRepresentation[item.key.rawValue] == nil else { continue }
