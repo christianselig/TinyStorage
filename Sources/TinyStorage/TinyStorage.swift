@@ -580,6 +580,11 @@ extension String: TinyStorageKey {
 public struct TinyStorageBulkStoreItem {
     let key: any TinyStorageKey
     let value: any Codable
+    
+    public init(key: any TinyStorageKey, value: any Codable) {
+        self.key = key
+        self.value = value
+    }
 }
 
 @propertyWrapper
@@ -589,7 +594,7 @@ public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable 
     private let key: any TinyStorageKey
     private let defaultValue: T
     
-    init(wrappedValue: T, key: any TinyStorageKey, storage: TinyStorage) {
+    public init(wrappedValue: T, key: any TinyStorageKey, storage: TinyStorage) {
         self.defaultValue = wrappedValue
         self.storage = storage
         self.key = key
