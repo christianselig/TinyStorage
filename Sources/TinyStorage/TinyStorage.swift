@@ -21,7 +21,7 @@ import OSLog
 @Observable
 public final class TinyStorage: @unchecked Sendable {
     private let directoryURL: URL
-    private let fileURL: URL
+    public let fileURL: URL
     
     /// Private in-memory store so each request doesn't have to go to disk.
     /// Note that as Data is stored (implementation oddity, using Codable you can't encode an abstract [String: any Codable] to Data) rather than the Codable object directly, it is decoded before being returned.
@@ -163,7 +163,7 @@ public final class TinyStorage: @unchecked Sendable {
         
         keysBeforeReset?.forEach { NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": $0]) }
     }
-        
+    
     /// Migrates `UserDefaults` into this instance of `TinyStorage` and stores to disk.
     ///
     /// - Parameters:
@@ -328,6 +328,34 @@ public final class TinyStorage: @unchecked Sendable {
     public func bulkStore(items: [TinyStorageBulkStoreItem]) {
         dispatchQueue.sync {
             for item in items {
+                let valueData: Data
+                
+                if let data = item.value as? Data {
+                    // Given value is already of type Data, so use directly
+                    valueData = data
+                } else {
+                    do {
+                        valueData = try JSONEncoder().encode(item.value)
+                    } catch {
+                        logger.error("Error bulk encoding new value for migration: \(String(describing: item.value), privacy: .private), with error: \(error)")
+                        return
+                    }
+                }
+
+                dictionaryRepresentation[item.key.rawValue] = valueData
+            }
+            
+            storeToDisk()
+        }
+    }
+    
+    /// Store given items at the specified keys if and only if those keys do not already have a value. Handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale. Akin to `registerDefaults` in `UserDefaults`.
+    public func storeIfNotAlreadyPresent(items: [TinyStorageBulkStoreItem]) {
+        dispatchQueue.sync {
+            for item in items {
+                // Skip if already present
+                guard dictionaryRepresentation[item.key.rawValue] == nil else { continue }
+                
                 let valueData: Data
                 
                 if let data = item.value as? Data {
