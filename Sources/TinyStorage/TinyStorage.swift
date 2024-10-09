@@ -40,8 +40,15 @@ public final class TinyStorage: @unchecked Sendable {
         dispatchQueue.sync { return Array(dictionaryRepresentation.keys) }
     }
     
-    public init(insideDirectory: URL) {
-        let directoryURL = insideDirectory.appending(path: "tiny-storage", directoryHint: .isDirectory)
+    /// Initialize an instance of `TinyStorage` for you to use.
+    ///
+    /// - Parameters:
+    ///   - insideDirectory: The directory where the directory and backing plist file for this TinyStorage instance will live.
+    ///   - name: The name of the directory that will be created to store the backing plist file.
+    ///
+    ///  - Note: TinyStorage creates a directory that the backing plist files lives in, for instance if you specify your name as "tinystorage-general-prefs" the file will live in ./tiny-storage-general-prefs/tiny-storage.plist where . is the directory you pass as `insideDirectory`.
+    public init(insideDirectory: URL, name: String) {
+        let directoryURL = insideDirectory.appending(path: name, directoryHint: .isDirectory)
         self.directoryURL = directoryURL
         
         let fileURL = directoryURL.appending(path: "tiny-storage.plist", directoryHint: .notDirectory)

@@ -42,14 +42,14 @@ Simply add a **Swift Package Manager** dependency for https://github.com/christi
 
 ## Usage
 
-First, either initialize an instance of `TinyStorage` or create a singleton and choose where you want the file on disk to live. To keep with `UserDefaults` convention I normally create a singleton for the app container:
+First, either initialize an instance of `TinyStorage` or create a singleton and choose firstly where you want the file on disk to live, and secondly the name of the directory that will be created to house the backing plist file (handy if you want to create multiple TinyStorage instances, just give each a different `name`!). To keep with `UserDefaults` convention I normally create a singleton for the app container:
 
 ```swift
 extension TinyStorage {
     static let appGroup: TinyStorage = {
         let appGroupID = "group.com.christianselig.example"
         let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)!
-        return .init(insideDirectory: containerURL)
+        return .init(insideDirectory: containerURL, name: "tiny-storage-general-prefs")
     }()
 }
 ```
