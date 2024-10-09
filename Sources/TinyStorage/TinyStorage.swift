@@ -15,7 +15,7 @@ import OSLog
 ///
 /// - For more performant retrieval, data is also stored in memory
 /// - Backed by NSFileCoordinator for disk access, so thread safe and inter-process safe, and backed by a serial dispatch queue for in-memory access
-/// - Does NOT use NSFilePresenter due to me being scared. Data is attempted to synchronize each time main app re-enters foreground as an easy means to accomplish synchronization, but if you have a long-living app extension where data is held in memory (for UI, for instance), you might need to implement some form of synchronization yourself to detect changes
+/// - Does NOT use NSFilePresenter due to me being scared. Uses DispatchSource to watch and respond to changes to the backing file.
 /// - Internally data is stored as [String: Data] where Data is expected to be Codable (otherwise will error), this is to minimize needing to unmarshal the entire top-level dictionary into Codable objects for each key request/write. We store this [String: Data] object as a binary plist to disk as [String: Data] is not JSON encodable due to Data not being JSON
 /// - Uses OSLog for logging
 @Observable
@@ -47,11 +47,12 @@ final class TinyStorage: @unchecked Sendable {
         let fileURL = directoryURL.appending(path: "tiny-storage.plist", directoryHint: .notDirectory)
         self.fileURL = fileURL
         
-        self.logger = Logger(subsystem: "com.christianselig.TinyStorage", category: "general")
+        let logger = Logger(subsystem: "com.christianselig.TinyStorage", category: "general")
+        self.logger = logger
         
+        self.dictionaryRepresentation = TinyStorage.retrieveStorageDictionary(directoryURL: directoryURL, fileURL: fileURL, logger: logger) ?? [:]
+
         logger.debug("Initialized with file path: \(fileURL.path())")
-        
-        dictionaryRepresentation = TinyStorage.retrieveStorageDictionary(directoryURL: directoryURL, fileURL: fileURL, logger: logger) ?? [:]
         
         setUpFileWatch()
     }
@@ -173,6 +174,11 @@ final class TinyStorage: @unchecked Sendable {
     func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteIfConflict: Bool) {
         dispatchQueue.sync {
             for key in keys {
+                guard let object = userDefaults.object(forKey: key) else {
+                    logger.warning("Requested migration of \(key) but it was not found in your UserDefaults instance")
+                    continue
+                }
+
                 if dictionaryRepresentation[key] != nil {
                     if overwriteIfConflict {
                         logger.info("Preparing to overwrite existing key \(key) during migration due to UserDefaults having the same key")
@@ -180,11 +186,6 @@ final class TinyStorage: @unchecked Sendable {
                         logger.info("Skipping key \(key) during migration due to UserDefaults having the same key and overwriting is disabled")
                         continue
                     }
-                }
-                
-                guard let object = userDefaults.object(forKey: key) else {
-                    logger.warning("Requested migration of \(key) but it was not found in your UserDefaults instance")
-                    continue
                 }
                 
                 // UserDefaults objects must be a property list type per Apple documentation https://developer.apple.com/documentation/foundation/userdefaults#2926904
@@ -490,7 +491,7 @@ final class TinyStorage: @unchecked Sendable {
         return storageDictionary
     }
     
-    /// Monitors the file on disk for changes from other processes
+    /// Sets up the monitoring of the file on disk for any changes, so we can detect when other processes modify it
     private func setUpFileWatch() {
         // Watch the directory rather than the file, as atomic writing will delete the old file which makes tracking it difficult otherwise
         let fileSystemRepresentation = FileManager.default.fileSystemRepresentation(withPath: directoryURL.path())
@@ -516,7 +517,8 @@ final class TinyStorage: @unchecked Sendable {
         
         source.resume()
     }
-    
+
+    /// Responds to the file change event
     private func processFileChangeEvent() {
         print("Processing a files changed event")
         
