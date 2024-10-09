@@ -169,7 +169,7 @@ public final class TinyStorage: @unchecked Sendable {
     /// - Parameters:
     ///   - userDefaults: The instance of `UserDefaults` to migrate.
     ///   - keys: `UserDefaults` stores a lot of data that Apple/iOS put in there that doesn't necessarily pertain to your app/need to be stored in `TinyStorage`, so it's required that you pass a set of keys for the keys you want to migrate.
-    ///   - overwriteIfConflict: If `true` and a key already exists in `TinyStorage` that is your `UserDefaults` key, the `UserDefaults` value will overwrite it
+    ///   - overwriteTinyStorageIfConflict: If `true` and a key exists both in this `TinyStorage` instance and the passed `UserDefaults`, the `UserDefaults` value will overwrite `TinyStorage`'s
     ///
     /// ## Notes
     ///
@@ -178,7 +178,7 @@ public final class TinyStorage: @unchecked Sendable {
     /// 3. You should store a flag (perhaps in `TinyStorage`!) that this migration is complete once finished so you don't call this function repeatedly
     /// 4. This `migrate` function does not support nested collections due to Swift not having any `AnyCodable` type and the complication in supporting deeply nested types. That means `[String: Any]` is fine, provided `Any` is not another array or dictionary. The same applies to Arrays, `[String]` is okay but `[[String]]` is not. This includes arrays of dictionaries. This does not mean `TinyStorage` itself does not support nested collections (it does), however the migrator does not. You are still free to migrate these types manually as a result (in which case look at the `bulkStore` function).
     /// 5. As TinyStorage does not support mixed collection types, neither does this `migrate` function. For instance an array of `[Any]` where `Any` could be a `String` or `Int` is invalid, as is `[String: Any]` where `Any` is not one consistent type.
-    public func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteIfConflict: Bool) {
+    public func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteTinyStorageIfConflict: Bool) {
         dispatchQueue.sync {
             for key in keys {
                 guard let object = userDefaults.object(forKey: key) else {
@@ -187,7 +187,7 @@ public final class TinyStorage: @unchecked Sendable {
                 }
 
                 if dictionaryRepresentation[key] != nil {
-                    if overwriteIfConflict {
+                    if overwriteTinyStorageIfConflict {
                         logger.info("Preparing to overwrite existing key \(key) during migration due to UserDefaults having the same key")
                     } else {
                         logger.info("Skipping key \(key) during migration due to UserDefaults having the same key and overwriting is disabled")
@@ -324,50 +324,34 @@ public final class TinyStorage: @unchecked Sendable {
         }
     }
     
-    /// Store multiple items at once, which will only result in one disk write, rather than a disk write for each individual storage as would happen if you called `store` on many individual items. Handy during a manual migration.
-    public func bulkStore(items: [TinyStorageBulkStoreItem]) {
+    /// Store multiple items at once, which will only result in one disk write, rather than a disk write for each individual storage as would happen if you called `store` on many individual items. Handy during a manual migration. Also supports removal by setting a key to `nil`.
+    ///
+    /// - Parameters:
+    ///   - items: A dictionary of items you want to store, note that T is optional for two reasons: 1) users can set keys to nil as an indication to remove them from storage 2) from what I understand T is already inherently optional due to being generic so this just makes it more explicit to the compiler so we can unwrap it easier (see: https://x.com/dsteppenbeck/status/1844131196055552409)
+    ///   - skipKeyIfAlreadyPresent: If `true` and the key is already present in the existing store, the new value will not be stored. This turns this function into something akin to `UserDefaults`' `registerDefaults` function, handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale.
+    public func bulkStore<T: Codable, U: TinyStorageKey>(items: [U: T?], skipKeyIfAlreadyPresent: Bool) {
         dispatchQueue.sync {
             for item in items {
-                let valueData: Data
-                
-                if let data = item.value as? Data {
-                    // Given value is already of type Data, so use directly
-                    valueData = data
-                } else {
-                    do {
-                        valueData = try JSONEncoder().encode(item.value)
-                    } catch {
-                        logger.error("Error bulk encoding new value for migration: \(String(describing: item.value), privacy: .private), with error: \(error)")
-                        return
-                    }
-                }
-
-                dictionaryRepresentation[item.key.rawValue] = valueData
-            }
-            
-            storeToDisk()
-        }
-    }
-    
-    /// Store given items at the specified keys if and only if those keys do not already have a value. Handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale. Akin to `registerDefaults` in `UserDefaults`.
-    public func storeIfNotAlreadyPresent(items: [TinyStorageBulkStoreItem]) {
-        dispatchQueue.sync {
-            for item in items {
-                // Skip if already present
-                guard dictionaryRepresentation[item.key.rawValue] == nil else { continue }
+                if skipKeyIfAlreadyPresent && dictionaryRepresentation[item.key.rawValue] != nil { continue }
                 
                 let valueData: Data
                 
-                if let data = item.value as? Data {
-                    // Given value is already of type Data, so use directly
-                    valueData = data
-                } else {
-                    do {
-                        valueData = try JSONEncoder().encode(item.value)
-                    } catch {
-                        logger.error("Error bulk encoding new value for migration: \(String(describing: item.value), privacy: .private), with error: \(error)")
-                        return
+                if let itemValue = item.value {
+                    if let data = item.value as? Data {
+                        // Given value is already of type Data, so use directly
+                        valueData = data
+                    } else {
+                        do {
+                            valueData = try JSONEncoder().encode(item.value)
+                        } catch {
+                            logger.error("Error bulk encoding new value for migration: \(String(describing: item.value), privacy: .private), with error: \(error)")
+                            continue
+                        }
                     }
+                } else {
+                    // Nil value, indicating desire to remove
+                    dictionaryRepresentation.removeValue(forKey: item.key.rawValue)
+                    continue
                 }
 
                 dictionaryRepresentation[item.key.rawValue] = valueData
@@ -577,15 +561,15 @@ extension String: TinyStorageKey {
 }
 
 /// Struct to help facilitate passing multiple items to store in `TinyStorage.bulkStore` as Swift dictionaries do not support existentials as keys
-public struct TinyStorageBulkStoreItem {
-    let key: any TinyStorageKey
-    let value: any Codable
-    
-    public init(key: any TinyStorageKey, value: any Codable) {
-        self.key = key
-        self.value = value
-    }
-}
+//public struct TinyStorageBulkStoreItem {
+//    let key: any TinyStorageKey
+//    let value: any Codable
+//    
+//    public init(key: any TinyStorageKey, value: any Codable) {
+//        self.key = key
+//        self.value = value
+//    }
+//}
 
 @propertyWrapper
 public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable {
