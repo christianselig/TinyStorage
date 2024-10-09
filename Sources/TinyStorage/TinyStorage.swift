@@ -19,7 +19,7 @@ import OSLog
 /// - Internally data is stored as [String: Data] where Data is expected to be Codable (otherwise will error), this is to minimize needing to unmarshal the entire top-level dictionary into Codable objects for each key request/write. We store this [String: Data] object as a binary plist to disk as [String: Data] is not JSON encodable due to Data not being JSON
 /// - Uses OSLog for logging
 @Observable
-final class TinyStorage: @unchecked Sendable {
+public final class TinyStorage: @unchecked Sendable {
     private let directoryURL: URL
     private let fileURL: URL
     
@@ -36,11 +36,11 @@ final class TinyStorage: @unchecked Sendable {
     private let logger: Logger
     
     /// All keys currently present in storage
-    var allKeys: [any TinyStorageKey] {
+    public var allKeys: [any TinyStorageKey] {
         dispatchQueue.sync { return Array(dictionaryRepresentation.keys) }
     }
     
-    init(insideDirectory: URL) {
+    public init(insideDirectory: URL) {
         let directoryURL = insideDirectory.appending(path: "tiny-storage", directoryHint: .isDirectory)
         self.directoryURL = directoryURL
         
@@ -65,7 +65,7 @@ final class TinyStorage: @unchecked Sendable {
     // MARK: - Public API
     
     /// Store a given `Codable` type on disk by the given key
-    func retrieve<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) -> T? {
+    public func retrieve<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) -> T? {
         return dispatchQueue.sync {
             guard let data = dictionaryRepresentation[key.rawValue] else {
                 logger.info("No key \(key.rawValue, privacy: .private) found in storage")
@@ -87,7 +87,7 @@ final class TinyStorage: @unchecked Sendable {
     }
     
     /// Stores a given value to disk (or removes if nil)
-    func store(_ value: Codable?, forKey key: any TinyStorageKey) {
+    public func store(_ value: Codable?, forKey key: any TinyStorageKey) {
         if let value {
             // Encode the Codable object back to Data before storing in memory and on disk
             let valueData: Data
@@ -120,12 +120,12 @@ final class TinyStorage: @unchecked Sendable {
     }
     
     /// Removes the value for the given key
-    func remove(key: any TinyStorageKey) {
+    public func remove(key: any TinyStorageKey) {
         store(nil, forKey: key)
     }
     
     /// Completely resets the storage, removing all values
-    func reset() {
+    public func reset() {
         var keysBeforeReset: Set<String>?
         
         let coordinator = NSFileCoordinator()
@@ -171,7 +171,7 @@ final class TinyStorage: @unchecked Sendable {
     /// 3. You should store a flag (perhaps in `TinyStorage`!) that this migration is complete once finished so you don't call this function repeatedly
     /// 4. This `migrate` function does not support nested collections due to Swift not having any `AnyCodable` type and the complication in supporting deeply nested types. That means `[String: Any]` is fine, provided `Any` is not another array or dictionary. The same applies to Arrays, `[String]` is okay but `[[String]]` is not. This includes arrays of dictionaries. This does not mean `TinyStorage` itself does not support nested collections (it does), however the migrator does not. You are still free to migrate these types manually as a result (in which case look at the `bulkStore` function).
     /// 5. As TinyStorage does not support mixed collection types, neither does this `migrate` function. For instance an array of `[Any]` where `Any` could be a `String` or `Int` is invalid, as is `[String: Any]` where `Any` is not one consistent type.
-    func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteIfConflict: Bool) {
+    public func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteIfConflict: Bool) {
         dispatchQueue.sync {
             for key in keys {
                 guard let object = userDefaults.object(forKey: key) else {
@@ -318,7 +318,7 @@ final class TinyStorage: @unchecked Sendable {
     }
     
     /// Store multiple items at once, which will only result in one disk write, rather than a disk write for each individual storage as would happen if you called `store` on many individual items. Handy during a manual migration.
-    func bulkStore(items: [TinyStorageBulkStoreItem]) {
+    public func bulkStore(items: [TinyStorageBulkStoreItem]) {
         dispatchQueue.sync {
             for item in items {
                 let valueData: Data
@@ -533,22 +533,22 @@ final class TinyStorage: @unchecked Sendable {
     }
 }
 
-protocol TinyStorageKey: Hashable, Sendable {
+public protocol TinyStorageKey: Hashable, Sendable {
     var rawValue: String { get }
 }
 
 extension String: TinyStorageKey {
-    var rawValue: String { self }
+    public var rawValue: String { self }
 }
 
 /// Struct to help facilitate passing multiple items to store in `TinyStorage.bulkStore` as Swift dictionaries do not support existentials as keys
-struct TinyStorageBulkStoreItem {
+public struct TinyStorageBulkStoreItem {
     let key: any TinyStorageKey
     let value: any Codable
 }
 
 @propertyWrapper
-struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable {
+public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable {
     @State private var storage: TinyStorage
     
     private let key: any TinyStorageKey
@@ -560,12 +560,12 @@ struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable {
         self.key = key
     }
     
-    var wrappedValue: T {
+    public var wrappedValue: T {
         get { storage.retrieve(type: T.self, forKey: key) ?? defaultValue }
         nonmutating set { storage.store(newValue, forKey: key) }
     }
     
-    var projectedValue: Binding<T> {
+    public var projectedValue: Binding<T> {
         Binding(
             get: { wrappedValue },
             set: { wrappedValue = $0 }
