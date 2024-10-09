@@ -76,6 +76,8 @@ TinyStorage.appGroup.store(true, forKey: AppStorageKeys.likesIceCream)
 
 (If you have some really weird type or don't want to conform to `Codable`, just convert the type to `Data` through whichever means you prefer and store *that*, as `Data` itself is `Codable`.)
 
+If a value is not present in storage, attempts to retrieve it will always return `nil`. This is in contrast to `UserDefaults` where some primitives like Int or Bool will return 0 or false respectively when not present, rather than `nil`.
+
 If you want to use it in SwiftUI and have your view automatically respond to changes for an item in your storage, you can use the `@TinyStorageItem` property wrapper. Simply specify your storage, the key for the item you want to access, and specify a default value.
 
 ```swift
