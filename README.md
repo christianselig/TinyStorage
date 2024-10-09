@@ -12,7 +12,7 @@ Born out of [encountering issues with `UserDefaults`](https://christianselig.com
 
 This means it's great for preferences and collections of data like bird species the user likes, but not for **sensitive** details. Do not store passwords/keys/tokens/secrets/diary entries/grammy's spaghetti recipe, anything that could be considered sensitive user information, as it's not encrypted on the disk. But don't use `UserDefaults` for sensitive details either as `UserDefaults` data is still fully decrypted when the device is locked so long as the user has unlocked the device once after reboot. Instead use `Keychain` for sensitive data.
 
-As with `UserDefaults`, `TinyStorage` is intended to be used with relatively small, ***non-sensitive*** values.  Don't store massive databases in `TinyStorage` as it's not optimized for that, but it's plenty fast for retrieving stored `Codable` types. As a point of reference I'd say keep it under 1 MB.
+As with `UserDefaults`, `TinyStorage` is intended to be used with values that are relatively small. Don't store massive databases in `TinyStorage` as it's not optimized for that, but it's plenty fast for retrieving stored `Codable` types. As a point of reference I'd say keep it under 1 MB.
 
 This reliable storing of small, non-sensitive data (to me) is what `UserDefaults` was always intended to do well, so this library attempts to realize that vision. It's pretty simple and just a few hundred lines, far from a marvel of filesystem engineering, but just a nice little utility hopefully!
 
