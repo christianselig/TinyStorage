@@ -560,17 +560,6 @@ extension String: TinyStorageKey {
     public var rawValue: String { self }
 }
 
-/// Struct to help facilitate passing multiple items to store in `TinyStorage.bulkStore` as Swift dictionaries do not support existentials as keys
-//public struct TinyStorageBulkStoreItem {
-//    let key: any TinyStorageKey
-//    let value: any Codable
-//    
-//    public init(key: any TinyStorageKey, value: any Codable) {
-//        self.key = key
-//        self.value = value
-//    }
-//}
-
 @propertyWrapper
 public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable {
     @State private var storage: TinyStorage
