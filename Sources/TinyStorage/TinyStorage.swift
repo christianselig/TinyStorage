@@ -96,20 +96,20 @@ public final class TinyStorage: @unchecked Sendable {
     /// Helper function that retrieves the object at the key and if it's a non-nil `Bool` will return its value, but if it's `nil`, will return `false`. Akin to `UserDefaults`' `bool(forKey:)` method.
     ///
     /// - Note: If there is a type mismatch (for instance the object stored at the key is a `Double`) will still return `false`, so you need to have confidence it was stored correctly.
-    func bool(forKey key: any TinyStorageKey) -> Bool {
+    public func bool(forKey key: any TinyStorageKey) -> Bool {
         retrieve(type: Bool.self, forKey: key) ?? false
     }
     
     /// Helper function that retrieves the object at the key and if it's a non-nil `Int` will return its value, but if it's `nil`, will return `0`. Akin to `UserDefaults`' `integer(forKey:)` method.
     ///
     /// - Note: If there is a type mismatch (for instance the object stored at the key is a `String`) will still return `0`, so you need to have confidence it was stored correctly.
-    func integer(forKey key: any TinyStorageKey) -> Int {
+    public func integer(forKey key: any TinyStorageKey) -> Int {
         retrieve(type: Int.self, forKey: key) ?? 0
     }
     
     /// Helper function that retrieves the object at the key and increments it before saving it back to storage and returns the newly incremented value. If no value is present at the key or there is a non `Int` value stored at the key, this function will assume you intended to initialize the value and thus write `1` to the key.
     @discardableResult
-    func incrementInteger(forKey key: any TinyStorageKey, by incrementBy: Int = 1) -> Int {
+    public func incrementInteger(forKey key: any TinyStorageKey, by incrementBy: Int = 1) -> Int {
         if var value = retrieve(type: Int.self, forKey: key) {
             value += incrementBy
             store(value, forKey: key)
