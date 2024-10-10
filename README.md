@@ -18,7 +18,7 @@ This reliable storing of small, non-sensitive data (to me) is what `UserDefaults
 
 (Also to be clear, `TinyStorage` is not a wrapper for `UserDefaults`, it is a full replacement. It does not interface with the `UserDefaults` system in any way.)
 
-# 🧪 Experimental/beta
+## 🧪 Experimental/beta
 
 TinyStorage is still in flux/active development, so APIs might change and there's a definite possibility of bugs. I mostly wanted to get it out early into the world in case anyone found it interesting, but consider forking it or pinning a specific version in Swift Package Manager if you don't want it changing a bunch. Feedback/PRs also more than welcome!
 
