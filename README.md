@@ -18,6 +18,10 @@ This reliable storing of small, non-sensitive data (to me) is what `UserDefaults
 
 (Also to be clear, `TinyStorage` is not a wrapper for `UserDefaults`, it is a full replacement. It does not interface with the `UserDefaults` system in any way.)
 
+# 🧪 Experimental/beta
+
+TinyStorage is still in flux/active development, so APIs might change and there's a definite possibility of bugs. I mostly wanted to get it out early into the world in case anyone found it interesting, but consider forking it or pinning a specific version in Swift Package Manager if you don't want it changing a bunch. Feedback/PRs also more than welcome!
+
 ## Features
 
 - Reliable access: even on first reboot or in application prewarming states, `TinyStorage` will read and write data properly
@@ -129,10 +133,12 @@ TinyStorage.appGroup.migrate(userDefaults: .standard, keys: keysToMigrate, overw
 If you want to migrate multiple keys manually or store a bunch of things at once, rather than a bunch of single `store` calls you can consolidate them into one call with `bulkStore` which will only write to disk the once:
 
 ```swift
-let item1 = TinyStorageBulkStoreItem(key: AppGroup.pet, value: pet)
-let item2 = TinyStorageBulkStoreItem(key: AppGroup.theme, value: "sunset")
-
-TinyStorage.appGroup.bulkStore(items: [item1, item2])
+TinyStorage.appGroup.bulkStore(items: [
+    AppStorageKeys.pet: pet,
+    AppStorageKeys.theme: "sunset"
+], skipKeyIfAlreadyPresent: false)
 ```
 
-Happy storage and hope you enjoy!
+(`skipKeyIfAlreadyPresent` when set to `true` creates an API akin to `registerDefaults` from `UserDefaults`.)
+
+Happy storage and hope you enjoy! 💾

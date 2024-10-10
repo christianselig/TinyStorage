@@ -327,9 +327,11 @@ public final class TinyStorage: @unchecked Sendable {
     /// Store multiple items at once, which will only result in one disk write, rather than a disk write for each individual storage as would happen if you called `store` on many individual items. Handy during a manual migration. Also supports removal by setting a key to `nil`.
     ///
     /// - Parameters:
-    ///   - items: A dictionary of items you want to store, note that T is optional for two reasons: 1) users can set keys to nil as an indication to remove them from storage 2) from what I understand T is already inherently optional due to being generic so this just makes it more explicit to the compiler so we can unwrap it easier (see: https://x.com/dsteppenbeck/status/1844131196055552409)
+    ///   - items: An array of items to store with a single disk write, Codable is optional so users can set keys to nil as an indication to remove them from storage.
     ///   - skipKeyIfAlreadyPresent: If `true` and the key is already present in the existing store, the new value will not be stored. This turns this function into something akin to `UserDefaults`' `registerDefaults` function, handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale.
-    public func bulkStore<T: Codable, U: TinyStorageKey>(items: [U: T?], skipKeyIfAlreadyPresent: Bool) {
+    ///
+    /// - Note: From what I understand Codable is already inherently optional due to Optional being Codable so this just makes it more explicit to the compiler so we can unwrap it easier, in other words there's no way to make it so folks can't pass in non-optional Codables when used as an existential (see: https://mastodon.social/@christianselig/113279213464286112)
+    public func bulkStore<U: TinyStorageKey>(items: [U: (any Codable)?], skipKeyIfAlreadyPresent: Bool) {
         dispatchQueue.sync {
             for item in items {
                 if skipKeyIfAlreadyPresent && dictionaryRepresentation[item.key.rawValue] != nil { continue }
@@ -342,9 +344,9 @@ public final class TinyStorage: @unchecked Sendable {
                         valueData = data
                     } else {
                         do {
-                            valueData = try JSONEncoder().encode(item.value)
+                            valueData = try JSONEncoder().encode(itemValue)
                         } catch {
-                            logger.error("Error bulk encoding new value for migration: \(String(describing: item.value), privacy: .private), with error: \(error)")
+                            logger.error("Error bulk encoding new value for migration: \(String(describing: itemValue), privacy: .private), with error: \(error)")
                             continue
                         }
                     }
