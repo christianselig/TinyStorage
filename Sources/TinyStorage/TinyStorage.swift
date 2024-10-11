@@ -1,6 +1,6 @@
 //
 //  TinyStorage.swift
-//  WritingPerfo
+//  TinyStorage
 //
 //  Created by Christian Selig on 2024-10-06.
 //
@@ -32,7 +32,7 @@ public final class TinyStorage: @unchecked Sendable {
     
     private var source: DispatchSourceFileSystemObject?
     
-    static let didChangeNotification = Notification.Name(rawValue: "com.christianselig.TinyStorage.didChangeNotification")
+    public static let didChangeNotification = Notification.Name(rawValue: "com.christianselig.TinyStorage.didChangeNotification")
     private let logger: Logger
     
     /// All keys currently present in storage
@@ -150,7 +150,7 @@ public final class TinyStorage: @unchecked Sendable {
             }
         }
         
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": key.rawValue])
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
     
     /// Removes the value for the given key
@@ -349,6 +349,8 @@ public final class TinyStorage: @unchecked Sendable {
             
             storeToDisk()
         }
+        
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
     
     /// Store multiple items at once, which will only result in one disk write, rather than a disk write for each individual storage as would happen if you called `store` on many individual items. Handy during a manual migration. Also supports removal by setting a key to `nil`.
@@ -388,6 +390,8 @@ public final class TinyStorage: @unchecked Sendable {
             
             storeToDisk()
         }
+        
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
     
     // MARK: - Internal API
@@ -578,6 +582,8 @@ public final class TinyStorage: @unchecked Sendable {
                 self.dictionaryRepresentation = newDictionaryRepresentation
             }
         }
+        
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
 }
 
