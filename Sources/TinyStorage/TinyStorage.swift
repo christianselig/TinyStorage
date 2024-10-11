@@ -71,28 +71,41 @@ public final class TinyStorage: @unchecked Sendable {
     
     // MARK: - Public API
     
-    /// Store a given `Codable` type on disk by the given key
-    public func retrieve<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) -> T? {
-        return dispatchQueue.sync {
+    /// Retrieve a value from storage at the given key and decode it as the given type, throwing if there are  any errors in attemping to retrieve. Note that it will not throw if the key simply holds nothing currently, and instead will return nil. This function is a handy alternative to `retrieve` if you want more information about errors, for instance if you can recover from them or if you want to log errors to your own logger.
+    ///
+    /// - Parameters:
+    ///   - type: The `Codable`-conforming type that the retrieved value should be decoded into.
+    ///   - keys: The key at which the value is stored.
+    public func retrieveOrThrow<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) throws -> T? {
+        return try dispatchQueue.sync {
             guard let data = dictionaryRepresentation[key.rawValue] else {
                 logger.info("No key \(key.rawValue, privacy: .private) found in storage")
                 return nil
             }
             
             if type == Data.self {
-                // User requested Data type so just return directly. Not sure why the cast is necessary as Data conforms to Codable
+                // This should never fail, as Data is Codable and the the type is Data, but the compiler does not know that T is explicitly data (and I don't believe there's a way to mark this) so the cast is required
                 return data as? T
             } else {
-                do {
-                    return try JSONDecoder().decode(T.self, from: data)
-                } catch {
-                    logger.error("Error decoding JSON data: \(error)")
-                    return nil
-                }
+                return try JSONDecoder().decode(T.self, from: data)
             }
         }
     }
-
+    
+    /// Retrieve a value from storage at the given key and decode it as the given type, but unlike `retrieveOrThrow` this function acts like `UserDefaults` in that it discards errors and simply returns nil. See `retrieveOrThrow` if you would to have more insight into errors.
+    ///
+    /// - Parameters:
+    ///   - type: The `Codable`-conforming type that the retrieved value should be decoded into.
+    ///   - keys: The key at which the value is stored.
+    public func retrieve<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) -> T? {
+        do {
+            return try retrieveOrThrow(type: type, forKey: key)
+        } catch {
+            logger.error("Error retrieving JSON data for key: \(key.rawValue), for type: \(String(reflecting: type)), with error: \(error)")
+            return nil
+        }
+    }
+    
     /// Helper function that retrieves the object at the key and if it's a non-nil `Bool` will return its value, but if it's `nil`, will return `false`. Akin to `UserDefaults`' `bool(forKey:)` method.
     ///
     /// - Note: If there is a type mismatch (for instance the object stored at the key is a `Double`) will still return `false`, so you need to have confidence it was stored correctly.
@@ -120,8 +133,12 @@ public final class TinyStorage: @unchecked Sendable {
         }
     }
     
-    /// Stores a given value to disk (or removes if nil)
-    public func store(_ value: Codable?, forKey key: any TinyStorageKey) {
+    /// Stores a given value to disk (or removes if nil), throwing errors that occur while attempting to store. Note that thrown errors do not include errors thrown while writing the actual value to disk, only for the in-memory aspect.
+    ///
+    /// - Parameters:
+    ///   - value: The `Codable`-conforming instance to store.
+    ///   - key: The key that the value will be stored at.
+    public func storeOrThrow(_ value: Codable?, forKey key: any TinyStorageKey) throws {
         if let value {
             // Encode the Codable object back to Data before storing in memory and on disk
             let valueData: Data
@@ -130,12 +147,7 @@ public final class TinyStorage: @unchecked Sendable {
                 // Given value is already of type Data, so use directly
                 valueData = data
             } else {
-                do {
-                    valueData = try JSONEncoder().encode(value)
-                } catch {
-                    logger.error("Error encoding new value for storage: \(String(describing: value), privacy: .private), with error: \(error)")
-                    return
-                }
+                valueData = try JSONEncoder().encode(value)
             }
             
             dispatchQueue.sync {
@@ -153,6 +165,19 @@ public final class TinyStorage: @unchecked Sendable {
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
     
+    /// Stores a given value to disk (or removes if nil). Unlike `storeOrThrow` this function is akin to `set` in `UserDefaults` in that any errors thrown are discarded. If you would like more insight into errors see `storeOrThrow`.
+    ///
+    /// - Parameters:
+    ///   - value: The `Codable`-conforming instance to store.
+    ///   - key: The key that the value will be stored at.
+    public func store(_ value: Codable?, forKey key: any TinyStorageKey) {
+        do {
+            try storeOrThrow(value, forKey: key)
+        } catch {
+            logger.error("Error storing key: \(key.rawValue), with value: \(String(describing: value), privacy: .private), with error: \(error)")
+        }
+    }
+    
     /// Removes the value for the given key
     public func remove(key: any TinyStorageKey) {
         store(nil, forKey: key)
@@ -160,15 +185,11 @@ public final class TinyStorage: @unchecked Sendable {
     
     /// Completely resets the storage, removing all values
     public func reset() {
-        var keysBeforeReset: Set<String>?
-        
         let coordinator = NSFileCoordinator()
         var coordinatorError: NSError?
         var successfullyRemoved = false
         
         dispatchQueue.sync {
-            keysBeforeReset = Set(dictionaryRepresentation.keys)
-            
             coordinator.coordinate(writingItemAt: fileURL, options: [.forDeleting], error: &coordinatorError) { url in
                 do {
                     try FileManager.default.removeItem(at: url)
@@ -188,7 +209,7 @@ public final class TinyStorage: @unchecked Sendable {
             return
         }
         
-        keysBeforeReset?.forEach { NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: ["key": $0]) }
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
     
     /// Migrates `UserDefaults` into this instance of `TinyStorage` and stores to disk.
@@ -196,7 +217,7 @@ public final class TinyStorage: @unchecked Sendable {
     /// - Parameters:
     ///   - userDefaults: The instance of `UserDefaults` to migrate.
     ///   - keys: `UserDefaults` stores a lot of data that Apple/iOS put in there that doesn't necessarily pertain to your app/need to be stored in `TinyStorage`, so it's required that you pass a set of keys for the keys you want to migrate.
-    ///   - overwriteTinyStorageIfConflict: If `true` and a key exists both in this `TinyStorage` instance and the passed `UserDefaults`, the `UserDefaults` value will overwrite `TinyStorage`'s
+    ///   - overwriteTinyStorageIfConflict: If `true` and a key exists both in this `TinyStorage` instance and the passed `UserDefaults`, the `UserDefaults` value will overwrite `TinyStorage`'s.
     ///
     /// ## Notes
     ///
@@ -573,6 +594,7 @@ public final class TinyStorage: @unchecked Sendable {
     /// Responds to the file change event
     private func processFileChangeEvent() {
         print("Processing a files changed event")
+        var actualChangeOccurred = false
         
         dispatchQueue.sync {
             let newDictionaryRepresentation = TinyStorage.retrieveStorageDictionary(directoryURL: directoryURL, fileURL: fileURL, logger: logger) ?? [:]
@@ -580,10 +602,13 @@ public final class TinyStorage: @unchecked Sendable {
             // Ensure something actually changed
             if self.dictionaryRepresentation != newDictionaryRepresentation {
                 self.dictionaryRepresentation = newDictionaryRepresentation
+                actualChangeOccurred = true
             }
         }
         
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        if actualChangeOccurred {
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        }
     }
 }
 
