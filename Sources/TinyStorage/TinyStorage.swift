@@ -75,7 +75,7 @@ public final class TinyStorage: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - type: The `Codable`-conforming type that the retrieved value should be decoded into.
-    ///   - keys: The key at which the value is stored.
+    ///   - key: The key at which the value is stored.
     public func retrieveOrThrow<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) throws -> T? {
         return try dispatchQueue.sync {
             guard let data = dictionaryRepresentation[key.rawValue] else {
@@ -96,7 +96,7 @@ public final class TinyStorage: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - type: The `Codable`-conforming type that the retrieved value should be decoded into.
-    ///   - keys: The key at which the value is stored.
+    ///   - key: The key at which the value is stored.
     public func retrieve<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) -> T? {
         do {
             return try retrieveOrThrow(type: type, forKey: key)
@@ -378,10 +378,10 @@ public final class TinyStorage: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - items: An array of items to store with a single disk write, Codable is optional so users can set keys to nil as an indication to remove them from storage.
-    ///   - skipKeyIfAlreadyPresent: If `true` and the key is already present in the existing store, the new value will not be stored. This turns this function into something akin to `UserDefaults`' `registerDefaults` function, handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale.
+    ///   - skipKeyIfAlreadyPresent: If `true` (default value is `false`) and the key is already present in the existing store, the new value will not be stored. This turns this function into something akin to `UserDefaults`' `registerDefaults` function, handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale.
     ///
     /// - Note: From what I understand Codable is already inherently optional due to Optional being Codable so this just makes it more explicit to the compiler so we can unwrap it easier, in other words there's no way to make it so folks can't pass in non-optional Codables when used as an existential (see: https://mastodon.social/@christianselig/113279213464286112)
-    public func bulkStore<U: TinyStorageKey>(items: [U: (any Codable)?], skipKeyIfAlreadyPresent: Bool) {
+    public func bulkStore<U: TinyStorageKey>(items: [U: (any Codable)?], skipKeyIfAlreadyPresent: Bool = false) {
         dispatchQueue.sync {
             for item in items {
                 if skipKeyIfAlreadyPresent && dictionaryRepresentation[item.key.rawValue] != nil { continue }
@@ -627,7 +627,7 @@ public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable 
     private let key: any TinyStorageKey
     private let defaultValue: T
     
-    public init(wrappedValue: T, key: any TinyStorageKey, storage: TinyStorage) {
+    public init(wrappedValue: T, _ key: any TinyStorageKey, storage: TinyStorage) {
         self.defaultValue = wrappedValue
         self.storage = storage
         self.key = key

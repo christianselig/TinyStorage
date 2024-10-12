@@ -85,7 +85,7 @@ If a value is not present in storage, attempts to retrieve it will always return
 If you want to use it in SwiftUI and have your view automatically respond to changes for an item in your storage, you can use the `@TinyStorageItem` property wrapper. Simply specify your storage, the key for the item you want to access, and specify a default value.
 
 ```swift
-@TinyStorageItem(key: AppStorageKey.pet, storage: .appGroup)
+@TinyStorageItem(AppStorageKey.pet, storage: .appGroup)
 var pet: = Pet(name: "Boots", species: .fish, hasLegs: false)
 
 var body: some View {
@@ -96,7 +96,7 @@ var body: some View {
 You can even use Bindings to automatically read/write.
 
 ```swift
-@TinyStorageItem(key: AppStorageKeys.message, storage: .appGroup)
+@TinyStorageItem(AppStorageKeys.message, storage: .appGroup)
 var message: String = ""
 
 var body: some View {
@@ -110,14 +110,14 @@ var body: some View {
 It also addresses some of the annoyances of `@AppStorage`, such as not being able to store collections:
 
 ```swift
-@TinyStorageItem(key: "names", storage: .appGroup)
+@TinyStorageItem("names", storage: .appGroup)
 var names: [String] = []
 ```
 
 Or better support for optional values:
 
 ```swift
-@TinyStorageItem(key: "nickname", storage: .appGroup)
+@TinyStorageItem("nickname", storage: .appGroup)
 var nickname: String? = nil // or "Cool Guy"
 ```
 
