@@ -124,11 +124,13 @@ var nickname: String? = nil // or "Cool Guy"
 You can also migrate from a `UserDefaults` instance to `TinyStorage` with a handy helper function:
 
 ```swift
-let keysToMigrate = ["favoriteIceCream", "appFontSize", "useCustomTheme", "lastFetchDate"]
-TinyStorage.appGroup.migrate(userDefaults: .standard, keys: keysToMigrate, overwriteIfConflict: true)
+let nonBoolKeysToMigrate = ["favoriteIceCream", "appFontSize", "lastFetchDate"]
+let boolKeysToMigrate = ["hasEatenIceCreamRecently", "usesCustomTheme"]
+
+TinyStorage.appGroup.migrate(userDefaults: .standard, nonBoolKeys: nonBoolKeysToMigrate, boolKeys: boolKeysToMigrate, overwriteIfConflict: true)
 ```
 
-(Read the `migrate` function documentation for more details.)
+Note that you have to specify which keys correspond to boolean values and which do not, as `UserDefaults` itself just stores booleans as integers behind the scenes and as part of migration we want to store booleans as proper Swift `Bool` types, and weTinyStorage unable to know if a `1` in `UserDefaults` is supposed to represent `true` or actually `1` without your input. Read the `migrate` function documentation for other important details!
 
 If you want to migrate multiple keys manually or store a bunch of things at once, rather than a bunch of single `store` calls you can consolidate them into one call with `bulkStore` which will only write to disk the once:
 

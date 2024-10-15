@@ -101,7 +101,8 @@ public final class TinyStorage: @unchecked Sendable {
         do {
             return try retrieveOrThrow(type: type, forKey: key)
         } catch {
-            logger.error("Error retrieving JSON data for key: \(key.rawValue), for type: \(String(reflecting: type)), with error: \(error)")
+            logger.error("Error retrieving JSON data for key: \(key.rawValue, privacy: .private), for type: \(String(reflecting: type)), with error: \(error)")
+            assertionFailure()
             return nil
         }
     }
@@ -174,7 +175,8 @@ public final class TinyStorage: @unchecked Sendable {
         do {
             try storeOrThrow(value, forKey: key)
         } catch {
-            logger.error("Error storing key: \(key.rawValue), with value: \(String(describing: value), privacy: .private), with error: \(error)")
+            logger.error("Error storing key: \(key.rawValue, privacy: .private), with value: \(String(describing: value), privacy: .private), with error: \(error)")
+            assertionFailure()
         }
     }
     
@@ -196,6 +198,7 @@ public final class TinyStorage: @unchecked Sendable {
                     successfullyRemoved = true
                 } catch {
                     logger.error("Error removing storage file: \(error)")
+                    assertionFailure()
                     successfullyRemoved = false
                 }
             }
@@ -203,172 +206,70 @@ public final class TinyStorage: @unchecked Sendable {
         
         if let coordinatorError {
             logger.error("Error coordinating storage file removal: \(coordinatorError)")
+            assertionFailure()
             return
         } else if !successfullyRemoved {
             logger.error("Unable to remove storage file")
+            assertionFailure()
             return
         }
         
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
     
-    /// Migrates `UserDefaults` into this instance of `TinyStorage` and stores to disk.
+    /// Migrates specified keys from the specified instance of `UserDefaults` into this instance of `TinyStorage` and stores to disk. As `UserDefaults` stores boolean values as 0 or 1 behind the scenes (so it's impossible to know if `1` refers to `true` or the integer value `1`, and `Codable` does care), you will need to specify which keys store Bool and which store non-boolean values in order for the migration to occur. If the key's value is improperly matched or unable to be decoded the logger will print an error and the key will be skipped.
     ///
     /// - Parameters:
     ///   - userDefaults: The instance of `UserDefaults` to migrate.
-    ///   - keys: `UserDefaults` stores a lot of data that Apple/iOS put in there that doesn't necessarily pertain to your app/need to be stored in `TinyStorage`, so it's required that you pass a set of keys for the keys you want to migrate.
+    ///   - nonBoolKeys: Keys for items in `UserDefaults` that store non-Bool values (eg: Strings, Codable types, Ints, etc.)
+    ///   - boolKeys: Keys for items in `UserDefaults` that store Bool values (ie: `true`/`false`). Arrays and Dictionaries of `Bool` also go here.
     ///   - overwriteTinyStorageIfConflict: If `true` and a key exists both in this `TinyStorage` instance and the passed `UserDefaults`, the `UserDefaults` value will overwrite `TinyStorage`'s.
     ///
     /// ## Notes
     ///
     /// 1. This function leaves the contents of `UserDefaults` intact, if you want `UserDefaults` erased you will need to do that yourself.
     /// 2. **It is up to you** to determine that `UserDefaults` is in a valid state prior to calling `migrate`, it is recommended you check both `UIApplication.isProtectedDataAvailable` is `true` and that a trusted key is present (with a value) in your `UserDefaults` instance.
-    /// 3. You should store a flag (perhaps in `TinyStorage`!) that this migration is complete once finished so you don't call this function repeatedly
+    /// 3. You should store a flag (for instance in `TinyStorage`) that this migration is complete once finished so you don't call this function repeatedly.
     /// 4. This `migrate` function does not support nested collections due to Swift not having any `AnyCodable` type and the complication in supporting deeply nested types. That means `[String: Any]` is fine, provided `Any` is not another array or dictionary. The same applies to Arrays, `[String]` is okay but `[[String]]` is not. This includes arrays of dictionaries. This does not mean `TinyStorage` itself does not support nested collections (it does), however the migrator does not. You are still free to migrate these types manually as a result (in which case look at the `bulkStore` function).
-    /// 5. As TinyStorage does not support mixed collection types, neither does this `migrate` function. For instance an array of `[Any]` where `Any` could be a `String` or `Int` is invalid, as is `[String: Any]` where `Any` is not one consistent type.
-    public func migrate(userDefaults: UserDefaults, keys: Set<String>, overwriteTinyStorageIfConflict: Bool) {
+    /// 5. As TinyStorage does not support mixed collection types, neither does this `migrate` function. For instance an array of `[Any]` that contains both a `String` and `Int` is invalid.
+    /// 6. TinyStorage encodes all floating point values as `Double` and all integer values as `Int`, but this does not preclude you from retrieving floating points as `Float32`, or integers as `Int8` for instance provided they fit.
+    /// 7. If a value that is intended to be a `Double` is encoded as an `Int` (for instance, it just happens to be `6.0` at time of migration and it thus stored as an `Int`), this is not of concern as you can still retrieve this as a `Double` after the fact.
+    /// 8. This function could theoretically fetch all the keys in `UserDefaults`, but `UserDefaults` stores a lot of data that Apple/iOS put in there that doesn't necessarily pertain to your app/need to be stored in `TinyStorage`, so it's required that you pass a set of keys for the keys you want to migrate.
+    /// 9. `UserDefaults` has functions `integer/double(forKey:)` and a corresponding `Bool` method that return `0` and `false` respectively if no key is present (as does TinyStorage) but as part of migration TinyStorage will not store 0/false, for the value if the key is not present, it will simply return skip the key, storing nothing for it.
+    public func migrate(userDefaults: UserDefaults, nonBoolKeys: Set<String>, boolKeys: Set<String>, overwriteTinyStorageIfConflict: Bool) {
         dispatchQueue.sync {
-            for key in keys {
-                guard let object = userDefaults.object(forKey: key) else {
-                    logger.warning("Requested migration of \(key) but it was not found in your UserDefaults instance")
+            logger.info("Migrating Bool keys")
+            
+            for boolKey in boolKeys {
+                guard let object = userDefaults.object(forKey: boolKey) else {
+                    logger.warning("Requested migration of \(boolKey) but it was not found in your UserDefaults instance")
                     continue
                 }
 
-                if dictionaryRepresentation[key] != nil {
-                    if overwriteTinyStorageIfConflict {
-                        logger.info("Preparing to overwrite existing key \(key) during migration due to UserDefaults having the same key")
-                    } else {
-                        logger.info("Skipping key \(key) during migration due to UserDefaults having the same key and overwriting is disabled")
-                        continue
-                    }
+                if shouldSkipKeyDuringMigration(key: boolKey, overwriteTinyStorageIfConflict: overwriteTinyStorageIfConflict) {
+                    continue
                 }
                 
-                // UserDefaults objects must be a property list type per Apple documentation https://developer.apple.com/documentation/foundation/userdefaults#2926904
-                if let integerObject = object as? Int {
-                    do {
-                        let data = try JSONEncoder().encode(integerObject)
-                        dictionaryRepresentation[key] = data
-                    } catch {
-                        logger.error("Error encoding Int to Data so could not migrate \(key): \(error)")
-                    }
-                } else if let doubleObject = object as? Double {
-                    do {
-                        let data = try JSONEncoder().encode(doubleObject)
-                        dictionaryRepresentation[key] = data
-                    } catch {
-                        logger.error("Error encoding Double to Data so could not migrate \(key): \(error)")
-                    }
-                } else if let stringObject = object as? String {
-                    do {
-                        let data = try JSONEncoder().encode(stringObject)
-                        dictionaryRepresentation[key] = data
-                    } catch {
-                        logger.error("Error encoding String to Data so could not migrate \(key): \(error)")
-                    }
-                } else if let dateObject = object as? Date  {
-                    do {
-                        let data = try JSONEncoder().encode(dateObject)
-                        dictionaryRepresentation[key] = data
-                    } catch {
-                        logger.error("Error encoding String to Data so could not migrate \(key): \(error)")
-                    }
-                } else if let arrayObject = object as? [Any] {
-                    // Note that mixed arrays are not permitted as there's not a native AnyCodable type in Swift
-                    if let integerArray = arrayObject as? [Int] {
-                        do {
-                            let data = try JSONEncoder().encode(integerArray)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Integer array to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let doubleArray = arrayObject as? [Double] {
-                        do {
-                            let data = try JSONEncoder().encode(doubleArray)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Double array to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let stringArray = arrayObject as? [String] {
-                        do {
-                            let data = try JSONEncoder().encode(stringArray)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding String array to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let dateArray = arrayObject as? [Date] {
-                        do {
-                            let data = try JSONEncoder().encode(dateArray)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Date array to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let _ = arrayObject as? [[String: Any]] {
-                        logger.warning("Nested collection types (in this case: dictionary inside array) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
-                    } else if let _ = arrayObject as? [[Any]]  {
-                        logger.warning("Nested collection types (in this case: array inside array) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
-                    } else if let dataArray = arrayObject as? [Data] {
-                        do {
-                            let data = try JSONEncoder().encode(dataArray)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Data array to Data so could not migrate \(key): \(error)")
-                        }
-                    } else {
-                        logger.warning("Mixed array type not supported in TinyStorage so not migrating \(key)")
-                    }
-                } else if let dictionaryObject = object as? [String: Any] {
-                    // Note that string dictionaries are the only supported dictionary type in UserDefaults
-                    // Also note that mixed dictionary values are not permitted as there's not a native AnyCodable type in Swift
-                    if let integerDictionary = dictionaryObject as? [String: Int] {
-                        do {
-                            let data = try JSONEncoder().encode(integerDictionary)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Integer dictionary to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let doubleDictionary = dictionaryObject as? [String: Double] {
-                        do {
-                            let data = try JSONEncoder().encode(doubleDictionary)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Double dictionary to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let stringDictionary = dictionaryObject as? [String: String] {
-                        do {
-                            let data = try JSONEncoder().encode(stringDictionary)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding String dictionary to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let dateDictionary = dictionaryObject as? [String: Date] {
-                        do {
-                            let data = try JSONEncoder().encode(dateDictionary)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Date dictionary to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let dataDictionary = dictionaryObject as? [String: Data] {
-                        do {
-                            let data = try JSONEncoder().encode(dataDictionary)
-                            dictionaryRepresentation[key] = data
-                        } catch {
-                            logger.error("Error encoding Data dictionary to Data so could not migrate \(key): \(error)")
-                        }
-                    } else if let _ = dictionaryObject as? [String: [String: Any]] {
-                        logger.warning("Nested collection types (in this case: dictionary inside dictionary) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
-                    } else if let _ = dictionaryObject as? [String: [Any]] {
-                        logger.warning("Nested collection types (in this case: array inside dictionary) are not supported by the migrator so \(key) was not migrated, please perform migration manually")
-                    } else {
-                        logger.warning("Mixed dictionary type not supported in TinyStorage so not migrating \(key)")
-                    }
-                } else if let dataObject = object as? Data {
-                    dictionaryRepresentation[key] = dataObject
-                } else {
-                    logger.error("Unknown type found in UserDefaults: \(type(of: object))")
+                migrateBool(boolKey: boolKey, object: object)
+            }
+            
+            logger.info("Migrating non-Bool keys")
+            
+            for nonBoolKey in nonBoolKeys {
+                guard let object = userDefaults.object(forKey: nonBoolKey) else {
+                    logger.warning("Requested migration of \(nonBoolKey) but it was not found in your UserDefaults instance")
+                    continue
                 }
+
+                if shouldSkipKeyDuringMigration(key: nonBoolKey, overwriteTinyStorageIfConflict: overwriteTinyStorageIfConflict) {
+                    continue
+                }
+                
+                migrateNonBool(nonBoolKey: nonBoolKey, object: object)
             }
             
             storeToDisk()
+            logger.info("Completed migration of bool and non-bool keys from UserDefaults")
         }
         
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
@@ -397,6 +298,7 @@ public final class TinyStorage: @unchecked Sendable {
                             valueData = try JSONEncoder().encode(itemValue)
                         } catch {
                             logger.error("Error bulk encoding new value for migration: \(String(describing: itemValue), privacy: .private), with error: \(error)")
+                            assertionFailure()
                             continue
                         }
                     }
@@ -426,6 +328,7 @@ public final class TinyStorage: @unchecked Sendable {
             storageDictionaryData = try PropertyListSerialization.data(fromPropertyList: emptyStorage, format: .binary, options: 0)
         } catch {
             logger.error("Error turning storage dictionary into Data: \(error)")
+            assertionFailure()
             return false
         }
         
@@ -448,6 +351,7 @@ public final class TinyStorage: @unchecked Sendable {
                     directoryCreatedSuccessfully = true
                 } else {
                     logger.error("Error creating directory: \(error)")
+                    assertionFailure()
                     directoryCreatedSuccessfully = false
                 }
             }
@@ -455,11 +359,13 @@ public final class TinyStorage: @unchecked Sendable {
         
         if let directoryCoordinatorError {
             logger.error("Unable to coordinate creation of directory: \(directoryCoordinatorError)")
+            assertionFailure()
             return false
         }
         
         guard directoryCreatedSuccessfully else {
             logger.error("Returning due to directory creation failing")
+            assertionFailure()
             return false
         }
         
@@ -473,6 +379,7 @@ public final class TinyStorage: @unchecked Sendable {
         
         if let fileCoordinatorError {
             logger.error("Error coordinating file writing: \(fileCoordinatorError)")
+            assertionFailure()
             return false
         }
         
@@ -489,6 +396,7 @@ public final class TinyStorage: @unchecked Sendable {
             storageDictionaryData = try PropertyListSerialization.data(fromPropertyList: dictionaryRepresentation, format: .binary, options: 0)
         } catch {
             logger.error("Error turning storage dictionary into Data: \(error)")
+            assertionFailure()
             return
         }
         
@@ -500,11 +408,13 @@ public final class TinyStorage: @unchecked Sendable {
                 try storageDictionaryData.write(to: url, options: [.atomic, .noFileProtection])
             } catch {
                 logger.error("Error writing storage dictionary data: \(error)")
+                assertionFailure()
             }
         }
         
         if let coordinatorError {
             logger.error("Error coordinating writing to storage file: \(coordinatorError)")
+            assertionFailure()
         }
     }
     
@@ -525,6 +435,7 @@ public final class TinyStorage: @unchecked Sendable {
                     needToCreateFile = true
                 } else {
                     logger.error("Error fetching TinyStorage file data: \(error)")
+                    assertionFailure()
                     return
                 }
             }
@@ -532,6 +443,7 @@ public final class TinyStorage: @unchecked Sendable {
         
         if let coordinatorError {
             logger.error("Error coordinating access to read file: \(coordinatorError)")
+            assertionFailure()
             return nil
         } else if needToCreateFile {
             if createEmptyStorageFile(directoryURL: directoryURL, fileURL: fileURL, logger: logger) {
@@ -541,6 +453,7 @@ public final class TinyStorage: @unchecked Sendable {
                 return [:]
             } else {
                 logger.error("Tried and failed to create TinyStorage file at \(fileURL.absoluteString) after attempting to retrieve it")
+                assertionFailure()
                 return nil
             }
         }
@@ -552,12 +465,14 @@ public final class TinyStorage: @unchecked Sendable {
         do {
             guard let properlyTypedDictionary = try PropertyListSerialization.propertyList(from: storageDictionaryData, format: nil) as? [String: Data] else {
                 logger.error("JSON data is not of type [String: Data]")
+                assertionFailure()
                 return nil
             }
             
             storageDictionary = properlyTypedDictionary
         } catch {
             logger.error("Error decoding storage dictionary from Data: \(error)")
+            assertionFailure()
             return nil
         }
 
@@ -608,6 +523,211 @@ public final class TinyStorage: @unchecked Sendable {
         
         if actualChangeOccurred {
             NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        }
+    }
+    
+    /// Helper function to perform a preliminary check if a key should be skipped for migration
+    private func shouldSkipKeyDuringMigration(key: String, overwriteTinyStorageIfConflict: Bool) -> Bool {
+        if dictionaryRepresentation[key] != nil {
+            if overwriteTinyStorageIfConflict {
+                logger.info("Preparing to overwrite existing key \(key) during migration due to UserDefaults having the same key")
+                return false
+            } else {
+                logger.info("Skipping key \(key) during migration due to UserDefaults having the same key and overwriting is disabled")
+                return true
+            }
+        } else {
+            return false
+        }
+    }
+    
+    /// Helper function as part of migrate to migrate specifically boolean values, must be called within dispatchQueue to synchronize access
+    private func migrateBool(boolKey: String, object: Any) {
+        // How UserDefaults treats Bool: when using object(forKey) it will return the integer value, and thus any value other than 0 or 1 will fail to cast as Bool and return nil (2, 2.5, etc. would return nil). However if you call bool(forKey) in UserDefaults anything non-zero will return true, including 1, 0.5, 1.5, 2, -10, etc., and mismatched values such as a string will return false.
+        // As a result we are using object(forKey:) for more granularity that to hopefully catch potential user error
+        if let boolValue = object as? Bool {
+            do {
+                let data = try JSONEncoder().encode(boolValue)
+                dictionaryRepresentation[boolKey] = data
+            } catch {
+                logger.error("Error encoding Bool to Data so could not migrate \(boolKey): \(error)")
+                assertionFailure()
+            }
+        } else if let boolArray = object as? [Bool] {
+            do {
+                let data = try JSONEncoder().encode(boolArray)
+                dictionaryRepresentation[boolKey] = data
+            } catch {
+                logger.error("Error encoding Bool-array to Data so could not migrate \(boolKey, privacy: .private): \(error)")
+                assertionFailure()
+            }
+        } else if let boolDictionary = object as? [String: Bool] {
+            // Reminder that strings are the only type UserDefaults permits as dictionary keys
+            do {
+                let data = try JSONEncoder().encode(boolDictionary)
+                dictionaryRepresentation[boolKey] = data
+            } catch {
+                logger.error("Error encoding Bool-dictionary to Data so could not migrate \(boolKey, privacy: .private): \(error)")
+                assertionFailure()
+            }
+        } else if let _ = object as? [[Any]] {
+            logger.error("Designated object at key \(boolKey) as Bool but gave nested array and nested collections are not a supported migration type, please perform migration manually")
+            assertionFailure()
+        } else if let _ = object as? [String: Any] {
+            logger.error("Designated object at key \(boolKey) as Bool but gave nested dictionary and nested collections are not a supported migration type, please perform migration manually")
+            assertionFailure()
+        } else {
+            logger.error("Designated object at key \(boolKey) as Bool but is actually \(type(of: object)) with value \(String(describing: object), privacy: .private) therefore not migrating")
+            assertionFailure()
+            return
+        }
+    }
+    
+    /// Helper function as part of migrate to migrate specifically non-boolean values, must be called within dispatchQueue to synchronize access
+    private func migrateNonBool(nonBoolKey: String, object: Any) {
+        // UserDefaults objects must be a property list type per Apple documentation https://developer.apple.com/documentation/foundation/userdefaults#2926904
+        if let integerObject = object as? Int {
+            do {
+                let data = try JSONEncoder().encode(integerObject)
+                dictionaryRepresentation[nonBoolKey] = data
+            } catch {
+                logger.error("Error encoding Int to Data so could not migrate \(nonBoolKey): \(error)")
+                assertionFailure()
+            }
+        } else if let doubleObject = object as? Double {
+            do {
+                let data = try JSONEncoder().encode(doubleObject)
+                dictionaryRepresentation[nonBoolKey] = data
+            } catch {
+                logger.error("Error encoding Double to Data so could not migrate \(nonBoolKey): \(error)")
+                assertionFailure()
+            }
+        } else if let stringObject = object as? String {
+            do {
+                let data = try JSONEncoder().encode(stringObject)
+                dictionaryRepresentation[nonBoolKey] = data
+            } catch {
+                logger.error("Error encoding String to Data so could not migrate \(nonBoolKey): \(error)")
+                assertionFailure()
+            }
+        } else if let dateObject = object as? Date  {
+            do {
+                let data = try JSONEncoder().encode(dateObject)
+                dictionaryRepresentation[nonBoolKey] = data
+            } catch {
+                logger.error("Error encoding String to Data so could not migrate \(nonBoolKey): \(error)")
+                assertionFailure()
+            }
+        } else if let arrayObject = object as? [Any] {
+            // Note that mixed arrays are not permitted as there's not a native AnyCodable type in Swift
+            if let integerArray = arrayObject as? [Int] {
+                do {
+                    let data = try JSONEncoder().encode(integerArray)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Integer array to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let doubleArray = arrayObject as? [Double] {
+                do {
+                    let data = try JSONEncoder().encode(doubleArray)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Double array to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let stringArray = arrayObject as? [String] {
+                do {
+                    let data = try JSONEncoder().encode(stringArray)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding String array to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let dateArray = arrayObject as? [Date] {
+                do {
+                    let data = try JSONEncoder().encode(dateArray)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Date array to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let _ = arrayObject as? [[String: Any]] {
+                logger.error("Nested collection types (in this case: dictionary inside array) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                assertionFailure()
+            } else if let _ = arrayObject as? [[Any]]  {
+                logger.error("Nested collection types (in this case: array inside array) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                assertionFailure()
+            } else if let dataArray = arrayObject as? [Data] {
+                do {
+                    let data = try JSONEncoder().encode(dataArray)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Data array to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else {
+                logger.error("Mixed array type not supported in TinyStorage so not migrating \(nonBoolKey)")
+                assertionFailure()
+            }
+        } else if let dictionaryObject = object as? [String: Any] {
+            // Note that string dictionaries are the only supported dictionary type in UserDefaults
+            // Also note that mixed dictionary values are not permitted as there's not a native AnyCodable type in Swift
+            if let integerDictionary = dictionaryObject as? [String: Int] {
+                do {
+                    let data = try JSONEncoder().encode(integerDictionary)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Integer dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let doubleDictionary = dictionaryObject as? [String: Double] {
+                do {
+                    let data = try JSONEncoder().encode(doubleDictionary)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Double dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let stringDictionary = dictionaryObject as? [String: String] {
+                do {
+                    let data = try JSONEncoder().encode(stringDictionary)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding String dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let dateDictionary = dictionaryObject as? [String: Date] {
+                do {
+                    let data = try JSONEncoder().encode(dateDictionary)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Date dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let dataDictionary = dictionaryObject as? [String: Data] {
+                do {
+                    let data = try JSONEncoder().encode(dataDictionary)
+                    dictionaryRepresentation[nonBoolKey] = data
+                } catch {
+                    logger.error("Error encoding Data dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    assertionFailure()
+                }
+            } else if let _ = dictionaryObject as? [String: [String: Any]] {
+                logger.error("Nested collection types (in this case: dictionary inside dictionary) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                assertionFailure()
+            } else if let _ = dictionaryObject as? [String: [Any]] {
+                logger.error("Nested collection types (in this case: array inside dictionary) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                assertionFailure()
+            } else {
+                logger.error("Mixed dictionary type not supported in TinyStorage so not migrating \(nonBoolKey)")
+                assertionFailure()
+            }
+        } else if let dataObject = object as? Data {
+            dictionaryRepresentation[nonBoolKey] = dataObject
+        } else {
+            logger.error("Unknown type found in UserDefaults: \(type(of: object))")
+            assertionFailure()
         }
     }
 }
