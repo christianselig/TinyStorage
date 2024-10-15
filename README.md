@@ -86,7 +86,7 @@ If you want to use it in SwiftUI and have your view automatically respond to cha
 
 ```swift
 @TinyStorageItem(AppStorageKey.pet, storage: .appGroup)
-var pet: = Pet(name: "Boots", species: .fish, hasLegs: false)
+var pet = Pet(name: "Boots", species: .fish, hasLegs: false)
 
 var body: some View {
     Text(pet.name)
