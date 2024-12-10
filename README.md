@@ -18,6 +18,10 @@ This reliable storing of small, non-sensitive data (to me) is what `UserDefaults
 
 (Also to be clear, `TinyStorage` is not a wrapper for `UserDefaults`, it is a full replacement. It does not interface with the `UserDefaults` system in any way.)
 
+## 🧪 Experimental/beta
+
+TinyStorage is still in flux/active development, so APIs might change and there's a definite possibility of bugs. I mostly wanted to get it out early into the world in case anyone found it interesting, but consider forking it or pinning a specific version in Swift Package Manager if you don't want it changing a bunch. Feedback/PRs also more than welcome!
+
 ## Features
 
 - Reliable access: even on first reboot or in application prewarming states, `TinyStorage` will read and write data properly
@@ -28,7 +32,7 @@ This reliable storing of small, non-sensitive data (to me) is what `UserDefaults
 - Uses `NSFileCoordinator` for coordinating reading/writing to disk so can be used safely across multiple processes at the same time (main target and widget target, for instance)
 - When using across multiple processes, will automatically detect changes to file on disk and update accordingly
 - SwiftUI property wrapper for easy use in a SwiftUI hierarchy (Similar to `@AppStorage`)
-- Can subscribe to to `TinyStorage.didChangeNotification` in `NotificationCenter`, and includes the key that changed in `userInfo`
+- Can subscribe to to `TinyStorage.didChangeNotification` in `NotificationCenter`
 - Uses `OSLog` for logging
 - A function to migrate your `UserDefaults` instance to `TinyStorage`
 
@@ -81,8 +85,8 @@ If a value is not present in storage, attempts to retrieve it will always return
 If you want to use it in SwiftUI and have your view automatically respond to changes for an item in your storage, you can use the `@TinyStorageItem` property wrapper. Simply specify your storage, the key for the item you want to access, and specify a default value.
 
 ```swift
-@TinyStorageItem(key: AppStorageKey.pet, storage: .appGroup)
-var pet: = Pet(name: "Boots", species: .fish, hasLegs: false)
+@TinyStorageItem(AppStorageKey.pet, storage: .appGroup)
+var pet = Pet(name: "Boots", species: .fish, hasLegs: false)
 
 var body: some View {
     Text(pet.name)
@@ -92,7 +96,7 @@ var body: some View {
 You can even use Bindings to automatically read/write.
 
 ```swift
-@TinyStorageItem(key: AppStorageKeys.message, storage: .appGroup)
+@TinyStorageItem(AppStorageKeys.message, storage: .appGroup)
 var message: String = ""
 
 var body: some View {
@@ -106,33 +110,37 @@ var body: some View {
 It also addresses some of the annoyances of `@AppStorage`, such as not being able to store collections:
 
 ```swift
-@TinyStorageItem(key: "names", storage: .appGroup)
+@TinyStorageItem("names", storage: .appGroup)
 var names: [String] = []
 ```
 
 Or better support for optional values:
 
 ```swift
-@TinyStorageItem(key: "nickname", storage: .appGroup)
+@TinyStorageItem("nickname", storage: .appGroup)
 var nickname: String? = nil // or "Cool Guy"
 ```
 
 You can also migrate from a `UserDefaults` instance to `TinyStorage` with a handy helper function:
 
 ```swift
-let keysToMigrate = ["favoriteIceCream", "appFontSize", "useCustomTheme", "lastFetchDate"]
-TinyStorage.appGroup.migrate(userDefaults: .standard, keys: keysToMigrate, overwriteIfConflict: true)
+let nonBoolKeysToMigrate = ["favoriteIceCream", "appFontSize", "lastFetchDate"]
+let boolKeysToMigrate = ["hasEatenIceCreamRecently", "usesCustomTheme"]
+
+TinyStorage.appGroup.migrate(userDefaults: .standard, nonBoolKeys: nonBoolKeysToMigrate, boolKeys: boolKeysToMigrate, overwriteIfConflict: true)
 ```
 
-(Read the `migrate` function documentation for more details.)
+Note that you have to specify which keys correspond to boolean values and which do not, as `UserDefaults` itself just stores booleans as integers behind the scenes and as part of migration we want to store booleans as proper Swift `Bool` types, and weTinyStorage unable to know if a `1` in `UserDefaults` is supposed to represent `true` or actually `1` without your input. Read the `migrate` function documentation for other important details!
 
 If you want to migrate multiple keys manually or store a bunch of things at once, rather than a bunch of single `store` calls you can consolidate them into one call with `bulkStore` which will only write to disk the once:
 
 ```swift
-let item1 = TinyStorageBulkStoreItem(key: AppGroup.pet, value: pet)
-let item2 = TinyStorageBulkStoreItem(key: AppGroup.theme, value: "sunset")
-
-TinyStorage.appGroup.bulkStore(items: [item1, item2])
+TinyStorage.appGroup.bulkStore(items: [
+    AppStorageKeys.pet: pet,
+    AppStorageKeys.theme: "sunset"
+], skipKeyIfAlreadyPresent: false)
 ```
 
-Happy storage and hope you enjoy!
+(`skipKeyIfAlreadyPresent` when set to `true` creates an API akin to `registerDefaults` from `UserDefaults`.)
+
+Happy storage and hope you enjoy! 💾
