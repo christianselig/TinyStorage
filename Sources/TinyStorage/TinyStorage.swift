@@ -35,6 +35,9 @@ public final class TinyStorage: @unchecked Sendable {
     public static let didChangeNotification = Notification.Name(rawValue: "com.christianselig.TinyStorage.didChangeNotification")
     private let logger: Logger
     
+    /// True if this instance of TinyStorage is being created for use in an Xcode SwiftUI Preview, which as of Xcode 16 does not seem to like creating files (so we'll just store things in memory as a work around) nor does it like file watching/monitoring. See [#8](https://github.com/christianselig/TinyStorage/issues/8).
+    private static let isBeingUsedInXcodePreview: Bool = ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
+    
     /// All keys currently present in storage
     public var allKeys: [any TinyStorageKey] {
         dispatchQueue.sync { return Array(dictionaryRepresentation.keys) }
@@ -187,6 +190,8 @@ public final class TinyStorage: @unchecked Sendable {
     
     /// Completely resets the storage, removing all values
     public func reset() {
+        guard !Self.isBeingUsedInXcodePreview else { return }
+        
         let coordinator = NSFileCoordinator()
         var coordinatorError: NSError?
         var successfullyRemoved = false
@@ -390,6 +395,8 @@ public final class TinyStorage: @unchecked Sendable {
     ///
     /// - Note: should only be called with a DispatchQueue lock on `dictionaryRepresentation``.
     private func storeToDisk() {
+        guard !Self.isBeingUsedInXcodePreview else { return }
+        
         let storageDictionaryData: Data
         
         do {
@@ -446,7 +453,10 @@ public final class TinyStorage: @unchecked Sendable {
             assertionFailure()
             return nil
         } else if needToCreateFile {
-            if createEmptyStorageFile(directoryURL: directoryURL, fileURL: fileURL, logger: logger) {
+            if Self.isBeingUsedInXcodePreview {
+                // Don't create files when being used in an Xcode preview
+                return [:]
+            } else if createEmptyStorageFile(directoryURL: directoryURL, fileURL: fileURL, logger: logger) {
                 logger.info("Successfully created empty TinyStorage file at \(fileURL)")
                 
                 // We just created it, so it would be empty
@@ -481,12 +491,16 @@ public final class TinyStorage: @unchecked Sendable {
     
     /// Sets up the monitoring of the file on disk for any changes, so we can detect when other processes modify it
     private func setUpFileWatch() {
+        // Xcode Previews also do not like file watching it seems
+        guard !Self.isBeingUsedInXcodePreview else { return }
+        
         // Watch the directory rather than the file, as atomic writing will delete the old file which makes tracking it difficult otherwise
         let fileSystemRepresentation = FileManager.default.fileSystemRepresentation(withPath: directoryURL.path())
         let fileDescriptor = open(fileSystemRepresentation, O_EVTONLY)
         
         guard fileDescriptor > 0 else {
-            print("Failed to set up file watch due to invalid file descriptor")
+            logger.error("Failed to set up file watch due to invalid file descriptor")
+            assertionFailure()
             return
         }
 
@@ -508,7 +522,7 @@ public final class TinyStorage: @unchecked Sendable {
 
     /// Responds to the file change event
     private func processFileChangeEvent() {
-        print("Processing a files changed event")
+        logger.info("Processing a files changed event")
         var actualChangeOccurred = false
         
         dispatchQueue.sync {
