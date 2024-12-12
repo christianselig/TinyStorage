@@ -44,6 +44,8 @@ Unlike `UserDefaults`, `TinyStorage` does not support mixed collections, so if y
 
 Simply add a **Swift Package Manager** dependency for https://github.com/christianselig/TinyStorage.git
 
+`TinyStorage` requires iOS 17 or higher due to using the newer `Observation` framework. If you have to support older versions of iOS @newky2k has kindly forked a version that uses the older `@ObservableObject` system! https://github.com/newky2k/TinyStorage
+
 ## Usage
 
 First, either initialize an instance of `TinyStorage` or create a singleton and choose firstly where you want the file on disk to live, and secondly the name of the directory that will be created to house the backing plist file (handy if you want to create multiple TinyStorage instances, just give each a different `name`!). To keep with `UserDefaults` convention I normally create a singleton for the app container:
