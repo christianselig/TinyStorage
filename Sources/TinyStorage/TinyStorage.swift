@@ -19,18 +19,18 @@ import OSLog
 /// - Internally data is stored as [String: Data] where Data is expected to be Codable (otherwise will error), this is to minimize needing to unmarshal the entire top-level dictionary into Codable objects for each key request/write. We store this [String: Data] object as a binary plist to disk as [String: Data] is not JSON encodable due to Data not being JSON
 /// - Uses OSLog for logging
 @Observable
-public final class TinyStorage: @unchecked Sendable {
+public final class TinyStorage: Sendable {
     private let directoryURL: URL
     public let fileURL: URL
     
     /// Private in-memory store so each request doesn't have to go to disk.
     /// Note that as Data is stored (implementation oddity, using Codable you can't encode an abstract [String: any Codable] to Data) rather than the Codable object directly, it is decoded before being returned.
-    private var dictionaryRepresentation: [String: Data]
+    nonisolated(unsafe) private var dictionaryRepresentation: [String: Data]
     
     /// Coordinates access to in-memory store
-    private let dispatchQueue = DispatchQueue(label: "TinyStorageInMemory")
+    private let dispatchQueue = DispatchQueue(label: "TinyStorageInMemory", attributes: .concurrent)
     
-    private var source: DispatchSourceFileSystemObject?
+    nonisolated(unsafe) private var source: DispatchSourceFileSystemObject?
     
     public static let didChangeNotification = Notification.Name(rawValue: "com.christianselig.TinyStorage.didChangeNotification")
     private let logger: Logger
@@ -143,30 +143,28 @@ public final class TinyStorage: @unchecked Sendable {
     ///   - value: The `Codable`-conforming instance to store.
     ///   - key: The key that the value will be stored at.
     public func storeOrThrow(_ value: Codable?, forKey key: any TinyStorageKey) throws {
-        if let value {
-            // Encode the Codable object back to Data before storing in memory and on disk
-            let valueData: Data
-            
-            if let data = value as? Data {
-                // Given value is already of type Data, so use directly
-                valueData = data
-            } else {
-                valueData = try JSONEncoder().encode(value)
-            }
-            
-            dispatchQueue.sync {
-                dictionaryRepresentation[key.rawValue] = valueData
+        try dispatchQueue.sync(flags: .barrier) {
+            if let value {
+                // Encode the Codable object back to Data before storing in memory and on disk
+                let valueData: Data
                 
+                if let data = value as? Data {
+                    // Given value is already of type Data, so use directly
+                    valueData = data
+                } else {
+                    valueData = try JSONEncoder().encode(value)
+                }
+                
+                dictionaryRepresentation[key.rawValue] = valueData
+                    
                 storeToDisk()
-            }
-        } else {
-            dispatchQueue.sync {
+            } else {
                 dictionaryRepresentation.removeValue(forKey: key.rawValue)
                 storeToDisk()
             }
+            
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
         }
-        
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
     }
     
     /// Stores a given value to disk (or removes if nil). Unlike `storeOrThrow` this function is akin to `set` in `UserDefaults` in that any errors thrown are discarded. If you would like more insight into errors see `storeOrThrow`.
