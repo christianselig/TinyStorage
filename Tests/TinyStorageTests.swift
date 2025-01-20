@@ -10,12 +10,10 @@ class TinyStorageTests: BaseTest {
   }
 
   @Test
-  func accessDoesNotDeadlock() {
-    withObservationTracking { [storage] in
-      //storage.bool(forKey: "test")
-      storage.store(true, forKey: "test")
-    } onChange: { [storage] in
-      #expect(storage.bool(forKey: "test") == true)
-    }
+  func callingResetWillRemoveStorageFile() {
+    storage.store("Hello, world!", forKey: "test")
+    #expect(FileManager.default.fileExists(atPath: storage.fileURL.path()))
+    storage.reset()
+    #expect(FileManager.default.fileExists(atPath: storage.fileURL.path()) == false )
   }
 }

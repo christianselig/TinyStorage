@@ -7,6 +7,6 @@ class BaseTest {
   let storage = TinyStorage(insideDirectory: URL.temporaryDirectory, name: UUID().uuidString)
 
   deinit {
-    //storage.reset()
+    storage.reset()
   }
 }

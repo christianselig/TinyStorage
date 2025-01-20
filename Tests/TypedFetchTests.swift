@@ -1,6 +1,5 @@
 import Foundation
 import Testing
-
 @testable import TinyStorage
 
 class TypedFetchTests: BaseTest {
