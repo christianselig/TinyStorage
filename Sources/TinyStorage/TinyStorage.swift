@@ -198,6 +198,12 @@ public final class TinyStorage: @unchecked Sendable {
         
         dispatchQueue.sync {
             coordinator.coordinate(writingItemAt: fileURL, options: [.forDeleting], error: &coordinatorError) { url in
+                guard FileManager.default.fileExists(atPath: url.path()) else {
+                    logger.info("Storage file does not exist, so skipping removal")
+                    successfullyRemoved = true
+                    return
+                }
+
                 do {
                     try FileManager.default.removeItem(at: url)
                     successfullyRemoved = true
