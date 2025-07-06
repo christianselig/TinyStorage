@@ -801,7 +801,7 @@ public struct TinyStorageItemSet<K: TinyStorageBuildableKey, T: Codable & Sendab
             var itemDictionary: [K: T] = [:]
             for key in storage.allKeys.compactMap({ K(rawValue: $0.rawValue) }) {
                 let retrieved = storage.retrieve(type: T.self, forKey: key)
-                itemDictionary[key] = storage.retrieve(type: T.self, forKey: key) ?? (defaultValue[key] ?? defaultValue.values.first)
+                itemDictionary[key] = retrieved ?? (defaultValue[key] ?? defaultValue.values.first)
             }
             if itemDictionary.isEmpty {
                 itemDictionary = defaultValue
