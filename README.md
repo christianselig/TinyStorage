@@ -123,7 +123,26 @@ Or better support for optional values:
 var nickname: String? = nil // or "Cool Guy"
 ```
 
-You can also migrate from a `UserDefaults` instance to `TinyStorage` with a handy helper function:
+And, if you want to get all values of a specific key type in your storage, you can use the `@TinyStorageItemSet` property wrapper. As opposed to `@TinyStorageItem`, you specify your storage then initialize a dictionary having the key and value types of your choosing on the condition that: 1. The key conforms to `TinyStorageBuildableKey`, and 2. The value conforms to Equatable. Default values are supported the same as before, keys without a default would default to the value of the first key if available.
+
+Note that `String` is not supported as a key type for this property wrapper.
+
+```swift
+@TinyStorageItemSet(storage: .appGroup)
+var platformStates: [Platform: AuthorizationState] = [.discord: .signedOut]
+
+var body: some View {
+    VStack {
+        ForEach(Array(platformStates.keys)) { platform in
+            Text("Platform \(platform.rawValue) is \(platformStates[platform]?.rawValue ?? "unset")")
+        }
+    }
+}
+```
+
+## Migrating from UserDefaults
+
+You can migrate from a `UserDefaults` instance to `TinyStorage` with a handy helper function:
 
 ```swift
 let nonBoolKeysToMigrate = ["favoriteIceCream", "appFontSize", "lastFetchDate"]
