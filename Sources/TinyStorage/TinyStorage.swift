@@ -750,6 +750,11 @@ public protocol TinyStorageKey: Hashable, Sendable {
     var rawValue: String { get }
 }
 
+/// A ``TinyStorageKey`` that could be initialized from a String raw value
+public protocol TinyStorageBuildableKey: TinyStorageKey {
+    init?(rawValue: String)
+}
+
 extension String: TinyStorageKey {
     public var rawValue: String { self }
 }
@@ -777,5 +782,58 @@ public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable 
             get: { wrappedValue },
             set: { wrappedValue = $0 }
         )
+    }
+}
+
+@propertyWrapper
+public struct TinyStorageItemSet<K: TinyStorageBuildableKey, T: Codable & Sendable & Equatable>: DynamicProperty, Sendable {
+    @State private var storage: TinyStorage
+    
+    private let defaultValue: [K: T]
+    
+    public init(wrappedValue: [K: T], storage: TinyStorage) {
+        self.defaultValue = wrappedValue
+        self.storage = storage
+    }
+    
+    public var wrappedValue: [K: T] {
+        get {
+            var itemDictionary: [K: T] = [:]
+            for key in storage.allKeys.compactMap({ K(rawValue: $0.rawValue) }) {
+                let retrieved = storage.retrieve(type: T.self, forKey: key)
+                itemDictionary[key] = retrieved ?? (defaultValue[key] ?? defaultValue.values.first)
+            }
+            if itemDictionary.isEmpty {
+                itemDictionary = defaultValue
+            }
+            return itemDictionary
+        }
+        nonmutating set { didSet(newValue) }
+    }
+    
+    public var projectedValue: Binding<[K: T]> {
+        Binding(
+            get: { wrappedValue },
+            set: { didSet($0) }
+        )
+    }
+    
+    private func didSet(_ newValue: [K: T]) {
+        let oldValue = wrappedValue
+        guard !(oldValue.isEmpty && newValue.isEmpty) else { return }
+        
+        let allKeys = Set(oldValue.keys).union(newValue.keys)
+        
+        let changedKeys = allKeys.filter { oldValue[$0] != newValue[$0] }
+        
+        let changedDict = newValue.filter({ changedKeys.contains($0.key) })
+        for (key, value) in changedDict {
+            storage.store(value, forKey: key)
+        }
+        
+        let removedKeys = changedKeys.filter({ !changedDict.keys.contains($0) })
+        for key in removedKeys {
+            storage.remove(key: key)
+        }
     }
 }
