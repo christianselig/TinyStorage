@@ -133,7 +133,7 @@ var platformStates: [Platform: AuthorizationState] = [.discord: .signedOut]
 
 var body: some View {
     VStack {
-        ForEach(Array(platformStates.keys)) { platform in
+        ForEach(Array(platformStates.keys), id: \.rawValue) { platform in
             Text("Platform \(platform.rawValue) is \(platformStates[platform]?.rawValue ?? "unset")")
         }
     }
