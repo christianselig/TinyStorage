@@ -18,22 +18,41 @@ import OSLog
 /// - Does NOT use NSFilePresenter due to me being scared. Uses DispatchSource to watch and respond to changes to the backing file.
 /// - Internally data is stored as [String: Data] where Data is expected to be Codable (otherwise will error), this is to minimize needing to unmarshal the entire top-level dictionary into Codable objects for each key request/write. We store this [String: Data] object as a binary plist to disk as [String: Data] is not JSON encodable due to Data not being JSON
 /// - Uses OSLog for logging
+/// - Uses indirect observation to propogate changes to SwiftUI, by using keySignals (which is itself observationIgnored because we don't want changes to one key affecting other keys, so we use Observation on the KeySignal itself that it holds). This prevents internal modifications of dictionaryRepresentation (our main in-memory store) from triggering code in the Observation system before we're done, which can cause re-entrancy/deadlock issues.
 @Observable
-public final class TinyStorage: @unchecked Sendable {
+nonisolated public final class TinyStorage: @unchecked Sendable {
     private let directoryURL: URL
     public let fileURL: URL
     
     /// Private in-memory store so each request doesn't have to go to disk.
     /// Note that as Data is stored (implementation oddity, using Codable you can't encode an abstract [String: any Codable] to Data) rather than the Codable object directly, it is decoded before being returned.
+    @ObservationIgnored
     private var dictionaryRepresentation: [String: Data]
     
+    @ObservationIgnored
+    private var keySignals: [String: KeySignal] = [:]
+
+    private enum GenerationState {
+        case unknown
+        case deleted
+        
+        /// The `generationID` of the file, which is weirdly exposed as an NSObject
+        case known(id: NSObject)
+    }
+
+    /// Track the last known file generation identifier so we can ignore change notifications emitted for our own atomic writes.
+    @ObservationIgnored
+    private var generationState: GenerationState = .unknown
+    
     /// Coordinates access to in-memory store
-    private let dispatchQueue = DispatchQueue(label: "TinyStorageInMemory")
+    private let dispatchQueue: DispatchQueue
+    private let dispatchQueueKey = DispatchSpecificKey<Void>()
     
     private var source: DispatchSourceFileSystemObject?
     
     public static let didChangeNotification = Notification.Name(rawValue: "com.christianselig.TinyStorage.didChangeNotification")
-    private let logger: Logger
+    
+    private let logger: TinyStorageLogging
     
     /// True if this instance of TinyStorage is being created for use in an Xcode SwiftUI Preview, which as of Xcode 16 does not seem to like creating files (so we'll just store things in memory as a work around) nor does it like file watching/monitoring. See [#8](https://github.com/christianselig/TinyStorage/issues/8).
     private static let isBeingUsedInXcodePreview: Bool = ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
@@ -50,25 +69,43 @@ public final class TinyStorage: @unchecked Sendable {
     ///   - name: The name of the directory that will be created to store the backing plist file.
     ///
     ///  - Note: TinyStorage creates a directory that the backing plist files lives in, for instance if you specify your name as "tinystorage-general-prefs" the file will live in ./tiny-storage-general-prefs/tiny-storage.plist where . is the directory you pass as `insideDirectory`.
-    public init(insideDirectory: URL, name: String) {
+    public init(insideDirectory: URL, name: String, logger: TinyStorageLogging = OSLogTinyStorageLogger()) {
+        let dispatchQueue = DispatchQueue(label: "TinyStorageInMemory", attributes: .concurrent)
+        dispatchQueue.setSpecific(key: dispatchQueueKey, value: ())
+        self.dispatchQueue = dispatchQueue
+        
         let directoryURL = insideDirectory.appending(path: name, directoryHint: .isDirectory)
         self.directoryURL = directoryURL
         
         let fileURL = directoryURL.appending(path: "tiny-storage.plist", directoryHint: .notDirectory)
         self.fileURL = fileURL
         
-        let logger = Logger(subsystem: "com.christianselig.TinyStorage", category: "general")
         self.logger = logger
         
         self.dictionaryRepresentation = TinyStorage.retrieveStorageDictionary(directoryURL: directoryURL, fileURL: fileURL, logger: logger) ?? [:]
 
-        logger.debug("Initialized with file path: \(fileURL.path())")
+        do {
+            let resourceValues = try fileURL.resourceValues(forKeys: [.generationIdentifierKey])
+            
+            if let generationIdentifier = resourceValues.generationIdentifier as? NSObject {
+                generationState = .known(id: generationIdentifier)
+            } else if !FileManager.default.fileExists(atPath: fileURL.path) {
+                generationState = .deleted
+            } else {
+                generationState = .unknown
+            }
+        } catch {
+            log(.error, "Failed to get resource values for \(fileURL.path()): \(error)")
+            generationState = .unknown
+        }
+
+        log(.debug, "Initialized with file path: \(fileURL.path())")
         
         setUpFileWatch()
     }
     
     deinit {
-        logger.info("Deinitializing TinyStorage")
+        log(.info, "Deinitializing TinyStorage")
         source?.cancel()
     }
     
@@ -80,9 +117,11 @@ public final class TinyStorage: @unchecked Sendable {
     ///   - type: The `Codable`-conforming type that the retrieved value should be decoded into.
     ///   - key: The key at which the value is stored.
     public func retrieveOrThrow<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) throws -> T? {
+        ensureNotAlreadyOnQueue()
+           
         return try dispatchQueue.sync {
             guard let data = dictionaryRepresentation[key.rawValue] else {
-                logger.info("No key \(key.rawValue, privacy: .private) found in storage")
+                log(.info, "No key \(key.rawValue) found in storage")
                 return nil
             }
             
@@ -104,10 +143,23 @@ public final class TinyStorage: @unchecked Sendable {
         do {
             return try retrieveOrThrow(type: type, forKey: key)
         } catch {
-            logger.error("Error retrieving JSON data for key: \(key.rawValue, privacy: .private), for type: \(String(reflecting: type)), with error: \(error)")
-            assertionFailure()
+            log(.error, "Error retrieving JSON data for key: \(key.rawValue), for type: \(String(reflecting: type)), with error: \(error)")
             return nil
         }
+    }
+    
+    /// Alternate version of `retrieve` that through the Observation framework will automatically update the UI upon the value for this particular key changing. Can also use the `@TinyStorageItem` property wrapper.
+    @MainActor
+    public func autoUpdatingRetrieve<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) -> T? {
+        _ = signal(for: key).value
+        return retrieve(type: type, forKey: key)
+    }
+    
+    /// Alternate version of `retrieveOrThrow` that through the Observation framework will automatically update the UI upon the value for this particular key changing. Can also use the `@TinyStorageItem` property wrapper.
+    @MainActor
+    public func autoUpdatingRetrieveOrThrow<T: Codable>(type: T.Type, forKey key: any TinyStorageKey) throws -> T? {
+        _ = signal(for: key).value
+        return try retrieveOrThrow(type: type, forKey: key)
     }
     
     /// Helper function that retrieves the object at the key and if it's a non-nil `Bool` will return its value, but if it's `nil`, will return `false`. Akin to `UserDefaults`' `bool(forKey:)` method.
@@ -123,18 +175,146 @@ public final class TinyStorage: @unchecked Sendable {
     public func integer(forKey key: any TinyStorageKey) -> Int {
         retrieve(type: Int.self, forKey: key) ?? 0
     }
-    
-    /// Helper function that retrieves the object at the key and increments it before saving it back to storage and returns the newly incremented value. If no value is present at the key or there is a non `Int` value stored at the key, this function will assume you intended to initialize the value and thus write `1` to the key.
+
+    /// Helper function that retrieves the object at the key and increments it before saving it back to storage and returns the newly incremented value. If no value is present at the key or there is a non `Int` value stored at the key (ensure the key was entered properly!), this function will assume you intended to initialize the value and thus write `incrementBy` to the key. If you pass a negative value to `incrementBy` it will be decremented by the absolute value of that amount.
     @discardableResult
     public func incrementInteger(forKey key: any TinyStorageKey, by incrementBy: Int = 1) -> Int {
-        if var value = retrieve(type: Int.self, forKey: key) {
-            value += incrementBy
-            store(value, forKey: key)
-            return value
-        } else {
-            store(1, forKey: key)
-            return 1
+        let keyString = key.rawValue
+        var newValue: Int = 0
+        var keysToNotify: Set<String> = []
+        var writeSucceeded = false
+
+        dispatchQueue.sync(flags: .barrier) {
+            guard !Self.isBeingUsedInXcodePreview else {
+                let currentValue: Int = {
+                    if let data = dictionaryRepresentation[keyString] {
+                        return (try? JSONDecoder().decode(Int.self, from: data)) ?? 0
+                    } else {
+                        return 0
+                    }
+                }()
+
+                newValue = currentValue + incrementBy
+
+                if let encoded = try? JSONEncoder().encode(newValue) {
+                    dictionaryRepresentation[keyString] = encoded
+                } else {
+                    dictionaryRepresentation.removeValue(forKey: keyString)
+                }
+
+                keysToNotify = [keyString]
+                writeSucceeded = true
+                return
+            }
+
+            let coordinator = NSFileCoordinator()
+            var coordinatorError: NSError?
+
+            coordinator.coordinate(writingItemAt: fileURL, options: [.forReplacing], error: &coordinatorError) { url in
+                // Pull the freshest data from disk
+                let existingData: Data? = {
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        do {
+                            return try Data(contentsOf: url)
+                        } catch {
+                            log(.error, "Error reading existing increment data at \(url.path()): \(error)")
+                            return nil
+                        }
+                    } else {
+                        log(.info, "No existing storage file at \(url.path()); treating as empty before incrementing")
+                        return nil
+                    }
+                }()
+
+                let existingDictionary: [String: Data] = {
+                    if let existingData {
+                        do {
+                            if let dictionary = try PropertyListSerialization.propertyList(from: existingData, format: nil) as? [String: Data] {
+                                return dictionary
+                            } else {
+                                return [:]
+                            }
+                        } catch {
+                            log(.error, "Error decoding property list from data: \(error)")
+                            return [:]
+                        }
+                    } else {
+                        return [:]
+                    }
+                }()
+                
+                var mergedDictionary = existingDictionary
+
+                let currentValue: Int = {
+                    if let data = existingDictionary[keyString] {
+                        do {
+                            return try JSONDecoder().decode(Int.self, from: data)
+                        } catch {
+                            log(.error, "Error decoding data as Int: \(error)")
+                            return 0
+                        }
+                    } else {
+                        return 0
+                    }
+                }()
+
+                let updatedValue = currentValue + incrementBy
+
+                do {
+                    mergedDictionary[keyString] = try JSONEncoder().encode(updatedValue)
+                } catch {
+                    log(.error, "Failed to encode incremented value for key: \(keyString) with error: \(error)")
+                    return
+                }
+
+                let data: Data
+
+                do {
+                    data = try PropertyListSerialization.data(fromPropertyList: mergedDictionary, format: .binary, options: 0)
+                } catch {
+                    log(.error, "Error encoding dictionary to property list data: \(error)")
+                    return
+                }
+
+                do {
+                    try data.write(to: url, options: [.atomic, .noFileProtection])
+                } catch {
+                    log(.error, "Error writing incremented data for key \(keyString): \(error)")
+                    return
+                }
+
+                dictionaryRepresentation = mergedDictionary
+
+                do {
+                    let resourceValues = try url.resourceValues(forKeys: [.generationIdentifierKey])
+
+                    if let identifier = resourceValues.generationIdentifier as? NSObject {
+                        generationState = .known(id: identifier)
+                    } else {
+                        generationState = .unknown
+                    }
+                } catch {
+                    log(.error, "Error getting resource values for \(url.path()): \(error)")
+                    generationState = .unknown
+                }
+
+                newValue = updatedValue
+                keysToNotify = [keyString]
+                writeSucceeded = true
+            }
+
+            if let coordinatorError {
+                log(.error, "Error coordinating increment write: \(coordinatorError)")
+            }
         }
+
+        if writeSucceeded && !keysToNotify.isEmpty {
+            Task(priority: .userInitiated) { @MainActor in
+                notifyKeysChanged(keysToNotify)
+            }
+        }
+
+        return newValue
     }
     
     /// Stores a given value to disk (or removes if nil), throwing errors that occur while attempting to store. Note that thrown errors do not include errors thrown while writing the actual value to disk, only for the in-memory aspect.
@@ -143,30 +323,122 @@ public final class TinyStorage: @unchecked Sendable {
     ///   - value: The `Codable`-conforming instance to store.
     ///   - key: The key that the value will be stored at.
     public func storeOrThrow(_ value: Codable?, forKey key: any TinyStorageKey) throws {
+        let keyString = key.rawValue
+        
+        let valueData: Data?
         if let value {
-            // Encode the Codable object back to Data before storing in memory and on disk
-            let valueData: Data
-            
             if let data = value as? Data {
-                // Given value is already of type Data, so use directly
                 valueData = data
             } else {
-                valueData = try JSONEncoder().encode(value)
-            }
-            
-            dispatchQueue.sync {
-                dictionaryRepresentation[key.rawValue] = valueData
-                
-                storeToDisk()
+                do {
+                    valueData = try JSONEncoder().encode(value)
+                } catch {
+                    log(.error, "Failed to encode key: \(keyString) as data due to error: \(error)")
+                    throw error
+                }
             }
         } else {
-            dispatchQueue.sync {
-                dictionaryRepresentation.removeValue(forKey: key.rawValue)
-                storeToDisk()
+            valueData = nil
+        }
+        
+        var writeSucceeded = false
+        
+        // NSFileCoordinator brief overview: we use dispatchQueue to synchronize access for this process, and NSFileCoordinator to synchronize access *across* processes. Because of this, we wait until we get the go-ahead from NSFileCoordinator before doing anything, AND we read back the changes inside, in case anything changed from other processes in the time between asking for the lock and receiving it
+        dispatchQueue.sync(flags: .barrier) {
+            guard !Self.isBeingUsedInXcodePreview else {
+                dictionaryRepresentation[key.rawValue] = valueData
+                writeSucceeded = true
+                return
+            }
+            
+            let coordinator = NSFileCoordinator()
+            var coordinatorError: NSError?
+            
+            coordinator.coordinate(writingItemAt: fileURL, options: [.forReplacing], error: &coordinatorError) { url in
+                // Pull the freshest data from the disk, treating nothing as empty storage/initial state
+                let existingData: Data? = {
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        do {
+                            return try Data(contentsOf: url)
+                        } catch {
+                            log(.error, "Error reading existing data at \(url.path()): \(error)")
+                            return nil
+                        }
+                    } else {
+                        log(.info, "No existing storage file at \(url.path()); treating as empty")
+                        return nil
+                    }
+                }()
+                
+                let existingDictionary: [String: Data] = {
+                    if let existingData {
+                        do {
+                            if let dictionary = try PropertyListSerialization.propertyList(from: existingData, format: nil) as? [String: Data] {
+                                return dictionary
+                            } else {
+                                return [:]
+                            }
+                        } catch {
+                            log(.error, "Error decoding property list from data: \(error)")
+                            return [:]
+                        }
+                    } else {
+                        return [:]
+                    }
+                }()
+                
+                var mergedDictionary = existingDictionary
+                
+                if let valueData {
+                    mergedDictionary[keyString] = valueData
+                } else {
+                    mergedDictionary.removeValue(forKey: keyString)
+                }
+
+                let data: Data
+                
+                do {
+                    data = try PropertyListSerialization.data(fromPropertyList: mergedDictionary, format: .binary, options: 0)
+                } catch {
+                    log(.error, "Error encoding dictionary to property list data: \(error)")
+                    return
+                }
+                
+                do {
+                    try data.write(to: url, options: [.atomic, .noFileProtection])
+                } catch {
+                    log(.error, "Error writing merged data for key \(keyString): \(error)")
+                    return
+                }
+                
+                dictionaryRepresentation = mergedDictionary
+                
+                do {
+                    let resourceValues = try url.resourceValues(forKeys: [.generationIdentifierKey])
+                    
+                    if let identifier = resourceValues.generationIdentifier as? NSObject {
+                        generationState = .known(id: identifier)
+                    } else {
+                        generationState = .unknown
+                    }
+                } catch {
+                    log(.error, "Error getting resource values for \(url.path()): \(error)")
+                    generationState = .unknown
+                }
+                
+                writeSucceeded = true
+            }
+            
+            if let coordinatorError {
+                log(.error, "Error coordinating write: \(coordinatorError)")
             }
         }
         
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        guard writeSucceeded else { return }
+        
+        Task(priority: .userInitiated) { @MainActor in
+            notifyKeysChanged([keyString])
+        }
     }
     
     /// Stores a given value to disk (or removes if nil). Unlike `storeOrThrow` this function is akin to `set` in `UserDefaults` in that any errors thrown are discarded. If you would like more insight into errors see `storeOrThrow`.
@@ -178,8 +450,7 @@ public final class TinyStorage: @unchecked Sendable {
         do {
             try storeOrThrow(value, forKey: key)
         } catch {
-            logger.error("Error storing key: \(key.rawValue, privacy: .private), with value: \(String(describing: value), privacy: .private), with error: \(error)")
-            assertionFailure()
+            log(.error, "Error storing key: \(key.rawValue), with error: \(error)")
         }
     }
     
@@ -192,40 +463,47 @@ public final class TinyStorage: @unchecked Sendable {
     public func reset() {
         guard !Self.isBeingUsedInXcodePreview else { return }
         
-        let coordinator = NSFileCoordinator()
-        var coordinatorError: NSError?
-        var successfullyRemoved = false
+        var keysToNotify: Set<String> = []
+        var resetFailed = false
         
-        dispatchQueue.sync {
+        dispatchQueue.sync(flags: .barrier) {
+            let coordinator = NSFileCoordinator()
+            var coordinatorError: NSError?
+            var deleteError: Error?
+            
             coordinator.coordinate(writingItemAt: fileURL, options: [.forDeleting], error: &coordinatorError) { url in
-                guard FileManager.default.fileExists(atPath: url.path()) else {
-                    logger.info("Storage file does not exist, so skipping removal")
-                    successfullyRemoved = true
-                    return
-                }
-
                 do {
-                    try FileManager.default.removeItem(at: url)
-                    successfullyRemoved = true
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        try FileManager.default.removeItem(at: url)
+                    }
                 } catch {
-                    logger.error("Error removing storage file: \(error)")
-                    assertionFailure()
-                    successfullyRemoved = false
+                    deleteError = error
                 }
             }
+            
+            if let coordinatorError {
+                log(.error, "Error coordinating storage file removal: \(coordinatorError)")
+                resetFailed = true
+                return
+            } else if let deleteError {
+                self.log(.error, "Error removing storage file: \(deleteError)")
+                resetFailed = true
+                return
+            }
+            
+            keysToNotify = Set(dictionaryRepresentation.keys)
+            dictionaryRepresentation.removeAll()
+            generationState = .deleted
+            log(.info, "Successfully reset")
         }
         
-        if let coordinatorError {
-            logger.error("Error coordinating storage file removal: \(coordinatorError)")
-            assertionFailure()
-            return
-        } else if !successfullyRemoved {
-            logger.error("Unable to remove storage file")
-            assertionFailure()
-            return
-        }
+        let keysToNotifyCopy = keysToNotify
         
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        if !resetFailed && !keysToNotifyCopy.isEmpty {
+            Task(priority: .userInitiated) { @MainActor in
+                self.notifyKeysChanged(keysToNotifyCopy)
+            }
+        }
     }
     
     /// Migrates specified keys from the specified instance of `UserDefaults` into this instance of `TinyStorage` and stores to disk. As `UserDefaults` stores boolean values as 0 or 1 behind the scenes (so it's impossible to know if `1` refers to `true` or the integer value `1`, and `Codable` does care), you will need to specify which keys store Bool and which store non-boolean values in order for the migration to occur. If the key's value is improperly matched or unable to be decoded the logger will print an error and the key will be skipped.
@@ -248,44 +526,120 @@ public final class TinyStorage: @unchecked Sendable {
     /// 8. This function could theoretically fetch all the keys in `UserDefaults`, but `UserDefaults` stores a lot of data that Apple/iOS put in there that doesn't necessarily pertain to your app/need to be stored in `TinyStorage`, so it's required that you pass a set of keys for the keys you want to migrate.
     /// 9. `UserDefaults` has functions `integer/double(forKey:)` and a corresponding `Bool` method that return `0` and `false` respectively if no key is present (as does TinyStorage) but as part of migration TinyStorage will not store 0/false, for the value if the key is not present, it will simply return skip the key, storing nothing for it.
     public func migrate(userDefaults: UserDefaults, nonBoolKeys: Set<String>, boolKeys: Set<String>, overwriteTinyStorageIfConflict: Bool) {
-        dispatchQueue.sync {
-            logger.info("Migrating Bool keys")
-            
-            for boolKey in boolKeys {
-                guard let object = userDefaults.object(forKey: boolKey) else {
-                    logger.warning("Requested migration of \(boolKey) but it was not found in your UserDefaults instance")
-                    continue
-                }
-
-                if shouldSkipKeyDuringMigration(key: boolKey, overwriteTinyStorageIfConflict: overwriteTinyStorageIfConflict) {
-                    continue
-                }
-                
-                migrateBool(boolKey: boolKey, object: object)
+        guard !Self.isBeingUsedInXcodePreview else { return }
+  
+        var preparedItems: [String: Data] = [:]
+        
+        for key in boolKeys {
+            if let object = userDefaults.object(forKey: key), let encoded = encodeBoolForMigration(boolKey: key, object: object) {
+                preparedItems[key] = encoded
             }
-            
-            logger.info("Migrating non-Bool keys")
-            
-            for nonBoolKey in nonBoolKeys {
-                guard let object = userDefaults.object(forKey: nonBoolKey) else {
-                    logger.warning("Requested migration of \(nonBoolKey) but it was not found in your UserDefaults instance")
-                    continue
-                }
-
-                if shouldSkipKeyDuringMigration(key: nonBoolKey, overwriteTinyStorageIfConflict: overwriteTinyStorageIfConflict) {
-                    continue
-                }
-                
-                migrateNonBool(nonBoolKey: nonBoolKey, object: object)
-            }
-            
-            storeToDisk()
-            logger.info("Completed migration of bool and non-bool keys from UserDefaults")
         }
         
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        for key in nonBoolKeys {
+            if let object = userDefaults.object(forKey: key), let encoded = encodeNonBoolForMigration(nonBoolKey: key, object: object) {
+                preparedItems[key] = encoded
+            }
+        }
+        
+        var keysToNotify: Set<String> = []
+        var writeSucceeded = false
+        
+        dispatchQueue.sync(flags: .barrier) {
+            let coordinator = NSFileCoordinator()
+            var coordinatorError: NSError?
+            
+            coordinator.coordinate(writingItemAt: fileURL, options: [.forReplacing], error: &coordinatorError) { url in
+                let existingData: Data? = {
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        do {
+                            return try Data(contentsOf: url)
+                        } catch {
+                            log(.error, "Error reading existing migration data at \(url.path()): \(error)")
+                            return nil
+                        }
+                    } else {
+                        log(.info, "No existing storage file at \(url.path()); treating as empty before migration")
+                        return nil
+                    }
+                }()
+                
+                let existingDictionary: [String: Data] = {
+                    if let existingData {
+                        do {
+                            if let dictionary = try PropertyListSerialization.propertyList(from: existingData, format: nil) as? [String: Data] {
+                                return dictionary
+                            } else {
+                                return [:]
+                            }
+                        } catch {
+                            log(.error, "Error decoding property list from data: \(error)")
+                            return [:]
+                        }
+                    } else {
+                        return [:]
+                    }
+                }()
+
+                var mergedDictionary = existingDictionary
+                var localKeysToNotify: Set<String> = []
+
+                for (key, value) in preparedItems {
+                    guard !shouldSkipKeyDuringMigration(key: key, overwriteTinyStorageIfConflict: overwriteTinyStorageIfConflict, existingDictionary: existingDictionary) else { continue }
+
+                    mergedDictionary[key] = value
+                    localKeysToNotify.insert(key)
+                }
+                                
+                let data: Data
+                
+                do {
+                    data = try PropertyListSerialization.data(fromPropertyList: mergedDictionary, format: .binary, options: 0)
+                } catch {
+                    log(.error, "Error encoding dictionary to property list data: \(error)")
+                    return
+                }
+                
+                do {
+                    try data.write(to: url, options: [.atomic, .noFileProtection])
+                } catch {
+                    log(.error, "Error writing migrated data to disk: \(error)")
+                    return
+                }
+                
+                dictionaryRepresentation = mergedDictionary
+
+
+                do {
+                    let resourceValues = try url.resourceValues(forKeys: [.generationIdentifierKey])
+                    
+                    if let identifier = resourceValues.generationIdentifier as? NSObject {
+                        generationState = .known(id: identifier)
+                    } else {
+                        generationState = .unknown
+                    }
+                } catch {
+                    log(.error, "Error getting resource values for \(url.path()): \(error)")
+                    generationState = .unknown
+                }
+
+                keysToNotify = localKeysToNotify
+                writeSucceeded = true
+                log(.info, "Completed migration")
+            }
+            
+            if let coordinatorError {
+                log(.error, "Error coordinating storage migration: \(coordinatorError)")
+            }
+        }
+        
+        if writeSucceeded && !keysToNotify.isEmpty {
+            Task(priority: .userInitiated) { @MainActor in
+                notifyKeysChanged(keysToNotify)
+            }
+        }
     }
-    
+        
     /// Store multiple items at once, which will only result in one disk write, rather than a disk write for each individual storage as would happen if you called `store` on many individual items. Handy during a manual migration. Also supports removal by setting a key to `nil`.
     ///
     /// - Parameters:
@@ -294,43 +648,189 @@ public final class TinyStorage: @unchecked Sendable {
     ///
     /// - Note: From what I understand Codable is already inherently optional due to Optional being Codable so this just makes it more explicit to the compiler so we can unwrap it easier, in other words there's no way to make it so folks can't pass in non-optional Codables when used as an existential (see: https://mastodon.social/@christianselig/113279213464286112)
     public func bulkStore<U: TinyStorageKey>(items: [U: (any Codable)?], skipKeyIfAlreadyPresent: Bool = false) {
-        dispatchQueue.sync {
-            for item in items {
-                if skipKeyIfAlreadyPresent && dictionaryRepresentation[item.key.rawValue] != nil { continue }
+        var keysToNotify: Set<String> = []
+        var writeSucceeded = false
+        
+        dispatchQueue.sync(flags: .barrier) {
+            let coordinator = NSFileCoordinator()
+            var coordinatorError: NSError?
+            
+            coordinator.coordinate(writingItemAt: fileURL, error: &coordinatorError) { url in
+                // Pull the freshest data from the disk, treating nothing as empty storage/initial state
+                let existingData = try? Data(contentsOf: url)
                 
-                let valueData: Data
-                
-                if let itemValue = item.value {
-                    if let data = item.value as? Data {
-                        // Given value is already of type Data, so use directly
-                        valueData = data
-                    } else {
+                let existingDictionary: [String: Data] = {
+                    if let existingData {
                         do {
-                            valueData = try JSONEncoder().encode(itemValue)
+                            if let dictionary = try PropertyListSerialization.propertyList(from: existingData, format: nil) as? [String: Data] {
+                                return dictionary
+                            } else {
+                                return [:]
+                            }
                         } catch {
-                            logger.error("Error bulk encoding new value for migration: \(String(describing: itemValue), privacy: .private), with error: \(error)")
-                            assertionFailure()
-                            continue
+                            log(.error, "Error decoding property list from data: \(error)")
+                            return [:]
                         }
+                    } else {
+                        return [:]
                     }
-                } else {
-                    // Nil value, indicating desire to remove
-                    dictionaryRepresentation.removeValue(forKey: item.key.rawValue)
-                    continue
+                }()
+                
+                var mergedDictionary = existingDictionary
+                
+                // Store a set of keys that we'll use to notify changes for if everything finishes without issue, otherwise we'd be writing directly to keysToNotify when we're not sure if everything even fully completed
+                var localKeysToNotify: Set<String> = []
+
+                for (key, value) in items {
+                    let rawKey = key.rawValue
+                    
+                    if skipKeyIfAlreadyPresent, mergedDictionary[rawKey] != nil { continue }
+                    
+                    if let value {
+                        let encoded: Data
+                        
+                        if let data = value as? Data {
+                            encoded = data
+                        } else {
+                            do {
+                                encoded = try JSONEncoder().encode(value)
+                            } catch {
+                                log(.error, "Failed to encode key: \(rawKey) as data due to error: \(error)")
+                                continue
+                            }
+                        }
+                        
+                        mergedDictionary[rawKey] = encoded
+                    } else {
+                        mergedDictionary.removeValue(forKey: rawKey)
+                    }
+                    
+                    localKeysToNotify.insert(rawKey)
                 }
 
-                dictionaryRepresentation[item.key.rawValue] = valueData
+                let data: Data
+                
+                do {
+                    data = try PropertyListSerialization.data(fromPropertyList: mergedDictionary, format: .binary, options: 0)
+                } catch {
+                    log(.error, "Error encoding dictionary to property list data: \(error)")
+                    return
+                }
+                
+                do {
+                    try data.write(to: url, options: [.atomic, .noFileProtection])
+                } catch {
+                    log(.error, "Error writing data to disk: \(error)")
+                    return
+                }
+                
+                dictionaryRepresentation = mergedDictionary
+                
+                do {
+                    let resourceValues = try url.resourceValues(forKeys: [.generationIdentifierKey])
+                    
+                    if let identifier = resourceValues.generationIdentifier as? NSObject {
+                        generationState = .known(id: identifier)
+                    } else {
+                        generationState = .unknown
+                    }
+                } catch {
+                    log(.error, "Error getting resource values for \(url.path()): \(error)")
+                    generationState = .unknown
+                }
+
+                keysToNotify = localKeysToNotify
+                writeSucceeded = true
             }
             
-            storeToDisk()
+            if let coordinatorError {
+                log(.error, "Error coordinating bulk store write: \(coordinatorError)")
+            }
         }
         
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        let keysToNotifyCopy = keysToNotify
+        
+        if writeSucceeded && !keysToNotifyCopy.isEmpty {
+            Task(priority: .userInitiated) { @MainActor in
+                notifyKeysChanged(keysToNotifyCopy)
+            }
+        }
     }
     
     // MARK: - Internal API
+        
+    private func log(_ level: TinyStorageLogLevel, _ message: String, file: String = #fileID, function: String = #function, line: Int = #line) {
+        Self.log(logger: logger, level: level, message: message, file: file, function: function, line: line)
+    }
     
-    private static func createEmptyStorageFile(directoryURL: URL, fileURL: URL, logger: Logger) -> Bool {
+    private static func log(logger: TinyStorageLogging, level: TinyStorageLogLevel, message: String, file: String = #fileID, function: String = #function, line: Int = #line) {
+        logger.log(level, message, file: file, function: function, line: line)
+        
+        #if !TINYSTORAGE_TESTING
+        if level.shouldPauseDuringDebug {
+            assertionFailure(message)
+        }
+        #endif
+    }
+    
+    @MainActor
+    fileprivate func signal(for key: any TinyStorageKey) -> KeySignal {
+        if let s = keySignals[key.rawValue] { return s }
+        let s = KeySignal()
+        keySignals[key.rawValue] = s
+        return s
+    }
+        
+    /// Diff two of our `dictionaryRepresentation` versions and receive back a set of keys that were changed
+    private func diffDictionaries(old: [String: Data], new: [String: Data]) -> Set<String> {
+        var changed: Set<String> = []
+        
+        // Removals and changes
+        for (oldKey, oldValue) in old {
+            // Check that it exists in the new dictionary too, otherwise it's been removed and should be considered a changed key
+            guard let newValue = new[oldKey] else {
+                changed.insert(oldKey)
+                continue
+            }
+            
+            // If the value changed that's also a changed key
+            if newValue != oldValue {
+                changed.insert(oldKey)
+            }
+        }
+        
+        // Additions
+        for newKey in new.keys where old[newKey] == nil {
+            changed.insert(newKey)
+        }
+        
+        return changed
+    }
+    
+    @MainActor
+    private func notifyKeysChanged(_ keys: Set<String>) {
+        var changesOccurred = false
+        
+        for key in keys {
+            changesOccurred = true
+            signal(for: key).bump()
+        }
+        
+        if changesOccurred {
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        }
+    }
+        
+    /// Check that we're not causing a reentrancy deadlock from entering the queue when we're already calling from the queue
+    private func ensureNotAlreadyOnQueue() {
+        if DispatchQueue.getSpecific(key: dispatchQueueKey) != nil {
+            #if !TINYSTORAGE_TESTING
+            assertionFailure("About to enter dispatch queue when already on the queue which would cause a deadlock")
+            #endif
+        }
+    }
+    
+    private static func createEmptyStorageFile(directoryURL: URL, fileURL: URL, logger: TinyStorageLogging) -> Bool {
         // First, create the empty data
         let storageDictionaryData: Data
         
@@ -338,8 +838,7 @@ public final class TinyStorage: @unchecked Sendable {
             let emptyStorage: [String: Data] = [:]
             storageDictionaryData = try PropertyListSerialization.data(fromPropertyList: emptyStorage, format: .binary, options: 0)
         } catch {
-            logger.error("Error turning storage dictionary into Data: \(error)")
-            assertionFailure()
+            log(logger: logger, level: .error, message: "Error turning storage dictionary into Data: \(error)")
             return false
         }
         
@@ -358,25 +857,22 @@ public final class TinyStorage: @unchecked Sendable {
                 
                 if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileWriteFileExistsError {
                     // Shouldn't happen, but just to be safe
-                    logger.info("Directory had already been created so continuing")
+                    logger.log(.info, "Directory had already been created so continuing", file: #fileID, function: #function, line: #line)
                     directoryCreatedSuccessfully = true
                 } else {
-                    logger.error("Error creating directory: \(error)")
-                    assertionFailure()
+                    logger.log(.error, "Error creating directory: \(error)", file: #fileID, function: #function, line: #line)
                     directoryCreatedSuccessfully = false
                 }
             }
         }
         
         if let directoryCoordinatorError {
-            logger.error("Unable to coordinate creation of directory: \(directoryCoordinatorError)")
-            assertionFailure()
+            logger.log(.error, "Unable to coordinate creation of directory: \(directoryCoordinatorError)", file: #fileID, function: #function, line: #line)
             return false
         }
         
         guard directoryCreatedSuccessfully else {
-            logger.error("Returning due to directory creation failing")
-            assertionFailure()
+            logger.log(.error, "Returning due to directory creation failing", file: #fileID, function: #function, line: #line)
             return false
         }
         
@@ -389,50 +885,15 @@ public final class TinyStorage: @unchecked Sendable {
         }
         
         if let fileCoordinatorError {
-            logger.error("Error coordinating file writing: \(fileCoordinatorError)")
-            assertionFailure()
+            logger.log(.error, "Error coordinating file writing: \(fileCoordinatorError)", file: #fileID, function: #function, line: #line)
             return false
         }
         
         return fileCreatedSuccessfully
     }
-
-    /// Writes the in-memory store to disk.
-    ///
-    /// - Note: should only be called with a DispatchQueue lock on `dictionaryRepresentation``.
-    private func storeToDisk() {
-        guard !Self.isBeingUsedInXcodePreview else { return }
-        
-        let storageDictionaryData: Data
-        
-        do {
-            storageDictionaryData = try PropertyListSerialization.data(fromPropertyList: dictionaryRepresentation, format: .binary, options: 0)
-        } catch {
-            logger.error("Error turning storage dictionary into Data: \(error)")
-            assertionFailure()
-            return
-        }
-        
-        let coordinator = NSFileCoordinator()
-        var coordinatorError: NSError?
-        
-        coordinator.coordinate(writingItemAt: fileURL, options: [.forReplacing], error: &coordinatorError) { url in
-            do {
-                try storageDictionaryData.write(to: url, options: [.atomic, .noFileProtection])
-            } catch {
-                logger.error("Error writing storage dictionary data: \(error)")
-                assertionFailure()
-            }
-        }
-        
-        if let coordinatorError {
-            logger.error("Error coordinating writing to storage file: \(coordinatorError)")
-            assertionFailure()
-        }
-    }
     
     /// Retrieves from disk the internal storage dictionary that serves as the basis for the storage structure. Static function so it can be called by `init`.
-    private static func retrieveStorageDictionary(directoryURL: URL, fileURL: URL, logger: Logger) -> [String: Data]? {
+    private static func retrieveStorageDictionary(directoryURL: URL, fileURL: URL, logger: TinyStorageLogging) -> [String: Data]? {
         let coordinator = NSFileCoordinator()
         var storageDictionaryData: Data?
         var coordinatorError: NSError?
@@ -447,29 +908,26 @@ public final class TinyStorage: @unchecked Sendable {
                 if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileReadNoSuchFileError {
                     needToCreateFile = true
                 } else {
-                    logger.error("Error fetching TinyStorage file data: \(error)")
-                    assertionFailure()
+                    logger.log(.error, "Error fetching TinyStorage file data: \(error)", file: #fileID, function: #function, line: #line)
                     return
                 }
             }
         }
         
         if let coordinatorError {
-            logger.error("Error coordinating access to read file: \(coordinatorError)")
-            assertionFailure()
+            logger.log(.error, "Error coordinating access to read file: \(coordinatorError)", file: #fileID, function: #function, line: #line)
             return nil
         } else if needToCreateFile {
             if Self.isBeingUsedInXcodePreview {
                 // Don't create files when being used in an Xcode preview
                 return [:]
             } else if createEmptyStorageFile(directoryURL: directoryURL, fileURL: fileURL, logger: logger) {
-                logger.info("Successfully created empty TinyStorage file at \(fileURL)")
+                logger.log(.info, "Successfully created empty TinyStorage file at \(fileURL)", file: #fileID, function: #function, line: #line)
                 
                 // We just created it, so it would be empty
                 return [:]
             } else {
-                logger.error("Tried and failed to create TinyStorage file at \(fileURL.absoluteString) after attempting to retrieve it")
-                assertionFailure()
+                logger.log(.error, "Tried and failed to create TinyStorage file at \(fileURL.absoluteString) after attempting to retrieve it", file: #fileID, function: #function, line: #line)
                 return nil
             }
         }
@@ -480,15 +938,13 @@ public final class TinyStorage: @unchecked Sendable {
         
         do {
             guard let properlyTypedDictionary = try PropertyListSerialization.propertyList(from: storageDictionaryData, format: nil) as? [String: Data] else {
-                logger.error("JSON data is not of type [String: Data]")
-                assertionFailure()
+                logger.log(.error, "JSON data is not of type [String: Data]", file: #fileID, function: #function, line: #line)
                 return nil
             }
             
             storageDictionary = properlyTypedDictionary
         } catch {
-            logger.error("Error decoding storage dictionary from Data: \(error)")
-            assertionFailure()
+            logger.log(.error, "Error decoding storage dictionary from Data: \(error)", file: #fileID, function: #function, line: #line)
             return nil
         }
 
@@ -505,8 +961,7 @@ public final class TinyStorage: @unchecked Sendable {
         let fileDescriptor = open(fileSystemRepresentation, O_EVTONLY)
         
         guard fileDescriptor > 0 else {
-            logger.error("Failed to set up file watch due to invalid file descriptor")
-            assertionFailure()
+            log(.error, "Failed to set up file watch due to invalid file descriptor")
             return
         }
 
@@ -515,7 +970,7 @@ public final class TinyStorage: @unchecked Sendable {
         self.source = source
         
         source.setEventHandler { [weak self] in
-            // Note that this will trigger even for changes we make within the same process (as these calls come in somewhat delayed versus when we change this with NSFileCoordinator), which will lead to this triggering and re-reading from disk again, which is wasteful, but I can't think of a way to get around this without poking holes in DispatchSource that would make it unreliable
+            // DispatchSource still fires for our own atomic writes (often twice), but processFileChangeEvent compares the file's generation identifier so in-process updates are ignored
             self?.processFileChangeEvent()
         }
         
@@ -528,32 +983,71 @@ public final class TinyStorage: @unchecked Sendable {
 
     /// Responds to the file change event
     private func processFileChangeEvent() {
-        logger.info("Processing a files changed event")
-        var actualChangeOccurred = false
+        log(.info, "Processing a files changed event")
         
-        dispatchQueue.sync {
+        var keysToNotify: Set<String> = []
+        
+        dispatchQueue.sync(flags: .barrier) {
+            let fileExists = FileManager.default.fileExists(atPath: fileURL.path)
+            var currentGenerationIdentifier: NSObject?
+
+            if fileExists {
+                do {
+                    let resourceValues = try fileURL.resourceValues(forKeys: [.generationIdentifierKey])
+                    
+                    if let identifier = resourceValues.generationIdentifier as? NSObject {
+                        currentGenerationIdentifier = identifier
+                        
+                        if case .known(let lastIdentifier) = generationState, lastIdentifier.isEqual(identifier) {
+                            log(.info, "Identified file change as our own and therefore ignoring")
+                            return
+                        }
+                    } else {
+                    }
+                } catch {
+                    log(.error, "Error getting resource values for \(fileURL.path()): \(error)")
+                }
+            } else if case .deleted = generationState {
+                return
+            }
+
+            let oldDictionaryRepresentation = dictionaryRepresentation
             let newDictionaryRepresentation = TinyStorage.retrieveStorageDictionary(directoryURL: directoryURL, fileURL: fileURL, logger: logger) ?? [:]
-            
-            // Ensure something actually changed
-            if self.dictionaryRepresentation != newDictionaryRepresentation {
+
+            if oldDictionaryRepresentation != newDictionaryRepresentation {
+                keysToNotify = diffDictionaries(old: oldDictionaryRepresentation, new: newDictionaryRepresentation)
                 self.dictionaryRepresentation = newDictionaryRepresentation
-                actualChangeOccurred = true
+            }
+
+            if fileExists {
+                if let currentGenerationIdentifier {
+                    generationState = .known(id: currentGenerationIdentifier)
+                } else {
+                    generationState = .unknown
+                }
+            } else {
+                generationState = .deleted
             }
         }
         
-        if actualChangeOccurred {
-            NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+        let keysToNotifyCopy = keysToNotify
+        
+        if !keysToNotifyCopy.isEmpty {
+            // Might not *technically* be user initiated but it immediately drives user UI so seems like a safe call
+            Task(priority: .userInitiated) { @MainActor in
+                notifyKeysChanged(keysToNotifyCopy)
+            }
         }
     }
     
     /// Helper function to perform a preliminary check if a key should be skipped for migration
-    private func shouldSkipKeyDuringMigration(key: String, overwriteTinyStorageIfConflict: Bool) -> Bool {
-        if dictionaryRepresentation[key] != nil {
+    private func shouldSkipKeyDuringMigration(key: String, overwriteTinyStorageIfConflict: Bool, existingDictionary: [String: Data]) -> Bool {
+        if existingDictionary[key] != nil {
             if overwriteTinyStorageIfConflict {
-                logger.info("Preparing to overwrite existing key \(key) during migration due to UserDefaults having the same key")
+                log(.info, "Preparing to overwrite existing key \(key) during migration due to UserDefaults having the same key")
                 return false
             } else {
-                logger.info("Skipping key \(key) during migration due to UserDefaults having the same key and overwriting is disabled")
+                log(.info, "Skipping key \(key) during migration due to UserDefaults having the same key and overwriting is disabled")
                 return true
             }
         } else {
@@ -561,198 +1055,178 @@ public final class TinyStorage: @unchecked Sendable {
         }
     }
     
-    /// Helper function as part of migrate to migrate specifically boolean values, must be called within dispatchQueue to synchronize access
-    private func migrateBool(boolKey: String, object: Any) {
+    private func encodeBoolForMigration(boolKey: String, object: Any) -> Data? {
         // How UserDefaults treats Bool: when using object(forKey) it will return the integer value, and thus any value other than 0 or 1 will fail to cast as Bool and return nil (2, 2.5, etc. would return nil). However if you call bool(forKey) in UserDefaults anything non-zero will return true, including 1, 0.5, 1.5, 2, -10, etc., and mismatched values such as a string will return false.
         // As a result we are using object(forKey:) for more granularity that to hopefully catch potential user error
         if let boolValue = object as? Bool {
             do {
-                let data = try JSONEncoder().encode(boolValue)
-                dictionaryRepresentation[boolKey] = data
+                return try JSONEncoder().encode(boolValue)
             } catch {
-                logger.error("Error encoding Bool to Data so could not migrate \(boolKey): \(error)")
-                assertionFailure()
+                log(.error, "Error encoding Bool to Data so could not migrate \(boolKey): \(error)")
+                return nil
             }
         } else if let boolArray = object as? [Bool] {
             do {
-                let data = try JSONEncoder().encode(boolArray)
-                dictionaryRepresentation[boolKey] = data
+                return try JSONEncoder().encode(boolArray)
             } catch {
-                logger.error("Error encoding Bool-array to Data so could not migrate \(boolKey, privacy: .private): \(error)")
-                assertionFailure()
+                log(.error, "Error encoding Bool-array to Data so could not migrate \(boolKey): \(error)")
+                return nil
             }
         } else if let boolDictionary = object as? [String: Bool] {
             // Reminder that strings are the only type UserDefaults permits as dictionary keys
             do {
-                let data = try JSONEncoder().encode(boolDictionary)
-                dictionaryRepresentation[boolKey] = data
+                return try JSONEncoder().encode(boolDictionary)
             } catch {
-                logger.error("Error encoding Bool-dictionary to Data so could not migrate \(boolKey, privacy: .private): \(error)")
-                assertionFailure()
+                log(.error, "Error encoding Bool-dictionary to Data so could not migrate \(boolKey): \(error)")
+                return nil
             }
         } else if let _ = object as? [[Any]] {
-            logger.error("Designated object at key \(boolKey) as Bool but gave nested array and nested collections are not a supported migration type, please perform migration manually")
-            assertionFailure()
+            log(.error, "Designated object at key \(boolKey) as Bool but gave nested array and nested collections are not a supported migration type, please perform migration manually")
+            return nil
         } else if let _ = object as? [String: Any] {
-            logger.error("Designated object at key \(boolKey) as Bool but gave nested dictionary and nested collections are not a supported migration type, please perform migration manually")
-            assertionFailure()
+            log(.error, "Designated object at key \(boolKey) as Bool but gave nested dictionary and nested collections are not a supported migration type, please perform migration manually")
+            return nil
         } else {
-            logger.error("Designated object at key \(boolKey) as Bool but is actually \(type(of: object)) with value \(String(describing: object), privacy: .private) therefore not migrating")
-            assertionFailure()
-            return
+            log(.error, "Designated object at key \(boolKey) as Bool but is actually \(type(of: object)) therefore not migrating")
+            return nil
         }
     }
     
-    /// Helper function as part of migrate to migrate specifically non-boolean values, must be called within dispatchQueue to synchronize access
-    private func migrateNonBool(nonBoolKey: String, object: Any) {
+    private func encodeNonBoolForMigration(nonBoolKey: String, object: Any) -> Data? {
         // UserDefaults objects must be a property list type per Apple documentation https://developer.apple.com/documentation/foundation/userdefaults#2926904
         if let integerObject = object as? Int {
             do {
-                let data = try JSONEncoder().encode(integerObject)
-                dictionaryRepresentation[nonBoolKey] = data
+                return try JSONEncoder().encode(integerObject)
             } catch {
-                logger.error("Error encoding Int to Data so could not migrate \(nonBoolKey): \(error)")
-                assertionFailure()
+                log(.error, "Error encoding Int to Data so could not migrate \(nonBoolKey): \(error)")
+                return nil
             }
         } else if let doubleObject = object as? Double {
             do {
-                let data = try JSONEncoder().encode(doubleObject)
-                dictionaryRepresentation[nonBoolKey] = data
+                return try JSONEncoder().encode(doubleObject)
             } catch {
-                logger.error("Error encoding Double to Data so could not migrate \(nonBoolKey): \(error)")
-                assertionFailure()
+                log(.error, "Error encoding Double to Data so could not migrate \(nonBoolKey): \(error)")
+                return nil
             }
         } else if let stringObject = object as? String {
             do {
-                let data = try JSONEncoder().encode(stringObject)
-                dictionaryRepresentation[nonBoolKey] = data
+                return try JSONEncoder().encode(stringObject)
             } catch {
-                logger.error("Error encoding String to Data so could not migrate \(nonBoolKey): \(error)")
-                assertionFailure()
+                log(.error, "Error encoding String to Data so could not migrate \(nonBoolKey): \(error)")
+                return nil
             }
         } else if let dateObject = object as? Date  {
             do {
-                let data = try JSONEncoder().encode(dateObject)
-                dictionaryRepresentation[nonBoolKey] = data
+                return try JSONEncoder().encode(dateObject)
             } catch {
-                logger.error("Error encoding String to Data so could not migrate \(nonBoolKey): \(error)")
-                assertionFailure()
+                log(.error, "Error encoding String to Data so could not migrate \(nonBoolKey): \(error)")
+                return nil
             }
         } else if let arrayObject = object as? [Any] {
             // Note that mixed arrays are not permitted as there's not a native AnyCodable type in Swift
             if let integerArray = arrayObject as? [Int] {
                 do {
-                    let data = try JSONEncoder().encode(integerArray)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(integerArray)
                 } catch {
-                    logger.error("Error encoding Integer array to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Integer array to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let doubleArray = arrayObject as? [Double] {
                 do {
-                    let data = try JSONEncoder().encode(doubleArray)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(doubleArray)
                 } catch {
-                    logger.error("Error encoding Double array to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Double array to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let stringArray = arrayObject as? [String] {
                 do {
-                    let data = try JSONEncoder().encode(stringArray)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(stringArray)
                 } catch {
-                    logger.error("Error encoding String array to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding String array to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let dateArray = arrayObject as? [Date] {
                 do {
-                    let data = try JSONEncoder().encode(dateArray)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(dateArray)
                 } catch {
-                    logger.error("Error encoding Date array to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Date array to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let _ = arrayObject as? [[String: Any]] {
-                logger.error("Nested collection types (in this case: dictionary inside array) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
-                assertionFailure()
+                log(.error, "Nested collection types (in this case: dictionary inside array) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                return nil
             } else if let _ = arrayObject as? [[Any]]  {
-                logger.error("Nested collection types (in this case: array inside array) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
-                assertionFailure()
+                log(.error, "Nested collection types (in this case: array inside array) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                return nil
             } else if let dataArray = arrayObject as? [Data] {
                 do {
-                    let data = try JSONEncoder().encode(dataArray)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(dataArray)
                 } catch {
-                    logger.error("Error encoding Data array to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Data array to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else {
-                logger.error("Mixed array type not supported in TinyStorage so not migrating \(nonBoolKey)")
-                assertionFailure()
+                log(.error, "Mixed array type not supported in TinyStorage so not migrating \(nonBoolKey)")
+                return nil
             }
         } else if let dictionaryObject = object as? [String: Any] {
             // Note that string dictionaries are the only supported dictionary type in UserDefaults
             // Also note that mixed dictionary values are not permitted as there's not a native AnyCodable type in Swift
             if let integerDictionary = dictionaryObject as? [String: Int] {
                 do {
-                    let data = try JSONEncoder().encode(integerDictionary)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(integerDictionary)
                 } catch {
-                    logger.error("Error encoding Integer dictionary to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Integer dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let doubleDictionary = dictionaryObject as? [String: Double] {
                 do {
-                    let data = try JSONEncoder().encode(doubleDictionary)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(doubleDictionary)
                 } catch {
-                    logger.error("Error encoding Double dictionary to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Double dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let stringDictionary = dictionaryObject as? [String: String] {
                 do {
-                    let data = try JSONEncoder().encode(stringDictionary)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(stringDictionary)
                 } catch {
-                    logger.error("Error encoding String dictionary to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding String dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let dateDictionary = dictionaryObject as? [String: Date] {
                 do {
-                    let data = try JSONEncoder().encode(dateDictionary)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(dateDictionary)
                 } catch {
-                    logger.error("Error encoding Date dictionary to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Date dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let dataDictionary = dictionaryObject as? [String: Data] {
                 do {
-                    let data = try JSONEncoder().encode(dataDictionary)
-                    dictionaryRepresentation[nonBoolKey] = data
+                    return try JSONEncoder().encode(dataDictionary)
                 } catch {
-                    logger.error("Error encoding Data dictionary to Data so could not migrate \(nonBoolKey): \(error)")
-                    assertionFailure()
+                    log(.error, "Error encoding Data dictionary to Data so could not migrate \(nonBoolKey): \(error)")
+                    return nil
                 }
             } else if let _ = dictionaryObject as? [String: [String: Any]] {
-                logger.error("Nested collection types (in this case: dictionary inside dictionary) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
-                assertionFailure()
+                log(.error, "Nested collection types (in this case: dictionary inside dictionary) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                return nil
             } else if let _ = dictionaryObject as? [String: [Any]] {
-                logger.error("Nested collection types (in this case: array inside dictionary) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
-                assertionFailure()
+                log(.error, "Nested collection types (in this case: array inside dictionary) are not supported by the migrator so \(nonBoolKey) was not migrated, please perform migration manually")
+                return nil
             } else {
-                logger.error("Mixed dictionary type not supported in TinyStorage so not migrating \(nonBoolKey)")
-                assertionFailure()
+                log(.error, "Mixed dictionary type not supported in TinyStorage so not migrating \(nonBoolKey)")
+                return nil
             }
         } else if let dataObject = object as? Data {
-            dictionaryRepresentation[nonBoolKey] = dataObject
+            return dataObject
         } else {
-            logger.error("Unknown type found in UserDefaults: \(type(of: object))")
-            assertionFailure()
+            log(.error, "Unknown type found in UserDefaults: \(type(of: object))")
+            return nil
         }
     }
 }
 
-public protocol TinyStorageKey: Hashable, Sendable {
+nonisolated public protocol TinyStorageKey: Hashable, Sendable {
     var rawValue: String { get }
 }
 
@@ -761,8 +1235,8 @@ extension String: TinyStorageKey {
 }
 
 @propertyWrapper
-public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable {
-    @State private var storage: TinyStorage
+public struct TinyStorageItem<T: Codable>: DynamicProperty {
+    private let storage: TinyStorage
     
     private let key: any TinyStorageKey
     private let defaultValue: T
@@ -773,15 +1247,61 @@ public struct TinyStorageItem<T: Codable & Sendable>: DynamicProperty, Sendable 
         self.key = key
     }
     
+    @MainActor
     public var wrappedValue: T {
-        get { storage.retrieve(type: T.self, forKey: key) ?? defaultValue }
+        get { storage.autoUpdatingRetrieve(type: T.self, forKey: key) ?? defaultValue }
         nonmutating set { storage.store(newValue, forKey: key) }
     }
     
+    @MainActor
     public var projectedValue: Binding<T> {
         Binding(
             get: { wrappedValue },
             set: { wrappedValue = $0 }
         )
+    }
+}
+
+@MainActor
+@Observable
+private final class KeySignal {
+    public private(set) var value: UInt = 0
+    
+    func bump() { value &+= 1 }
+}
+
+nonisolated public enum TinyStorageLogLevel {
+    case debug, info, warning, error, fault, critical, trace, notice
+    
+    var shouldPauseDuringDebug: Bool {
+        switch self {
+        case .debug, .info, .warning, .trace, .notice: false
+        case .error, .fault, .critical: true
+        }
+    }
+}
+
+nonisolated public protocol TinyStorageLogging {
+    func log(_ level: TinyStorageLogLevel, _ message: String, file: String, function: String, line: Int)
+}
+
+nonisolated public struct OSLogTinyStorageLogger: TinyStorageLogging {
+    private let logger: os.Logger = .init(subsystem: "com.christianselig.TinyStorage", category: "general")
+    
+    public init() {}
+    
+    public func log(_ level: TinyStorageLogLevel, _ message: String, file: String, function: String, line: Int) {
+        let prefix = "[\(file)#\(line) \(function)] "
+        
+        switch level {
+        case .debug: logger.debug("\(prefix)\(message)")
+        case .notice: logger.notice("\(prefix)\(message)")
+        case .trace: logger.trace("\(prefix)\(message)")
+        case .critical: logger.critical("\(prefix)\(message)")
+        case .info: logger.info("\(prefix)\(message)")
+        case .warning: logger.warning("\(prefix)\(message)")
+        case .error: logger.error("\(prefix)\(message)")
+        case .fault: logger.fault("\(prefix)\(message)")
+        }
     }
 }

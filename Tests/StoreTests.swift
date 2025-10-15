@@ -18,15 +18,17 @@ private struct BadEncodable: Codable {
   }
 }
 
-class StoreTests: BaseTest {
+@Suite struct StoreTests {
   @Test
-  func canStoreAndRetrieveBool() {
+  func canStoreAndRetrieveBool() throws {
+    let storage = try TestHelpers.makeStore()
     storage.store(true, forKey: "test")
     #expect(storage.bool(forKey: "test") == true)
   }
 
   @Test
-  func storingNilRemovesKey() {
+  func storingNilRemovesKey() throws {
+    let storage = try TestHelpers.makeStore()
     storage.store("Hello, world!", forKey: "test")
     #expect(storage.retrieve(type: String.self, forKey: "test") == "Hello, world!")
     storage.store(nil, forKey: "test")
@@ -34,14 +36,16 @@ class StoreTests: BaseTest {
   }
 
   @Test
-  func storingFailedEncodableThrowsError() {
+  func storingFailedEncodableThrowsError() throws {
+    let storage = try TestHelpers.makeStore()
     #expect(throws: TestError.failedToEncode) {
       try storage.storeOrThrow(BadEncodable(), forKey: "test")
     }
   }
 
   @Test
-  func callingRemoveWillRemoveKey() {
+  func callingRemoveWillRemoveKey() throws {
+    let storage = try TestHelpers.makeStore()
     storage.store("Hello, world!", forKey: "test")
     #expect(storage.retrieve(type: String.self, forKey: "test") == "Hello, world!")
     storage.remove(key: "test")
@@ -49,14 +53,17 @@ class StoreTests: BaseTest {
   }
 
   @Test
-  func callingBulkStoreWillStoreMultipleKeys() {
+  func callingBulkStoreWillStoreMultipleKeys() throws {
+    let storage = try TestHelpers.makeStore()
     let items: [String: (any Codable)?] = ["test": "Hello, world!", "test2": 1337]
     storage.bulkStore(items: items)
     #expect(storage.retrieve(type: String.self, forKey: "test") == "Hello, world!")
     #expect(storage.retrieve(type: Int.self, forKey: "test2") == 1337)
   }
 
-  @Test func callingBulkStoreWillSkipKeysIfAlreadyPresent() {
+  @Test
+  func callingBulkStoreWillSkipKeysIfAlreadyPresent() throws {
+    let storage = try TestHelpers.makeStore()
     storage.store("Hello, world!", forKey: "test")
     let items: [String: (any Codable)?] = ["test": "Overwrite content", "test2": 1337]
     storage.bulkStore(items: items, skipKeyIfAlreadyPresent: true)
@@ -65,7 +72,9 @@ class StoreTests: BaseTest {
     #expect(storage.retrieve(type: Int.self, forKey: "test2") == 1337)
   }
 
-  @Test func callingBulkStoreWillOverwriteKeys() {
+  @Test
+  func callingBulkStoreWillOverwriteKeys() throws {
+    let storage = try TestHelpers.makeStore()
     storage.store("Hello, world!", forKey: "test")
     let items: [String: (any Codable)?] = ["test": "Overwrite content", "test2": 1337]
     storage.bulkStore(items: items, skipKeyIfAlreadyPresent: false)
@@ -74,7 +83,9 @@ class StoreTests: BaseTest {
     #expect(storage.retrieve(type: Int.self, forKey: "test2") == 1337)
   }
 
-  @Test func callingBulkStoreWillOverwriteKeysByDefault() {
+  @Test
+  func callingBulkStoreWillOverwriteKeysByDefault() throws {
+    let storage = try TestHelpers.makeStore()
     storage.store("Hello, world!", forKey: "test")
     let items: [String: (any Codable)?] = ["test": "Overwrite content", "test2": 1337]
     storage.bulkStore(items: items)

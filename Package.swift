@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "TinyStorage",
-    platforms: [.iOS(.v17), .tvOS(.v17), .visionOS(.v1), .watchOS(.v10), .macOS(.v14)],
+    platforms: [.iOS(.v17), .tvOS(.v17), .visionOS(.v1), .watchOS(.v10)],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
@@ -17,11 +17,13 @@ let package = Package(
     targets: [
         .target(
             name: "TinyStorage",
-            dependencies: []
+            dependencies: [],
+            swiftSettings: [.define("TINYSTORAGE_TESTING", .when(configuration: .debug))] 
         ),
         .testTarget(
             name: "TinyStorageTests",
-            dependencies: ["TinyStorage"]
+            dependencies: ["TinyStorage"],
+            swiftSettings: [.define("TINYSTORAGE_TESTING")]
         )
     ]
 )

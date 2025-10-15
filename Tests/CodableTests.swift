@@ -6,9 +6,10 @@ struct SampleData: Codable, Equatable {
   let id: UUID
 }
 
-class CodableTests: BaseTest {
+@Suite struct CodableTests {
   @Test
-  func canStoreAndRetrieveCodable() {
+  func canStoreAndRetrieveCodable() throws {
+    let storage = try TestHelpers.makeStore()
     let sampleData = SampleData(id: UUID())
     storage.store(sampleData, forKey: "test")
     let retrievedData = storage.retrieve(type: SampleData.self, forKey: "test")
