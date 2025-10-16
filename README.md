@@ -123,6 +123,18 @@ Or better support for optional values:
 var nickname: String? = nil // or "Cool Guy"
 ```
 
+### Retrieval APIs at a Glance
+
+- Use `retrieve(_:forKey:)` (or helpers like `bool(forKey:)`) when you just want the current value. These calls stay on TinyStorage’s internal queue and are thread safe.
+- Use `autoUpdatingRetrieve(_:forKey:)` (or the `@TinyStorageItem` wrapper) when you need SwiftUI to refresh automatically. MainActor required.
+
+```swift
+@MainActor
+func headline(storage: TinyStorage) -> String {
+    storage.autoUpdatingRetrieve(type: String.self, forKey: AppStorageKeys.message) ?? ""
+}
+```
+
 You can also migrate from a `UserDefaults` instance to `TinyStorage` with a handy helper function:
 
 ```swift
@@ -132,7 +144,25 @@ let boolKeysToMigrate = ["hasEatenIceCreamRecently", "usesCustomTheme"]
 TinyStorage.appGroup.migrate(userDefaults: .standard, nonBoolKeys: nonBoolKeysToMigrate, boolKeys: boolKeysToMigrate, overwriteIfConflict: true)
 ```
 
-Note that you have to specify which keys correspond to boolean values and which do not, as `UserDefaults` itself just stores booleans as integers behind the scenes and as part of migration we want to store booleans as proper Swift `Bool` types, and weTinyStorage unable to know if a `1` in `UserDefaults` is supposed to represent `true` or actually `1` without your input. Read the `migrate` function documentation for other important details!
+Note that you have to specify which keys correspond to boolean values and which do not, as `UserDefaults` itself just stores booleans as integers behind the scenes and as part of migration we want to store booleans as proper Swift `Bool` types, and we can’t know if a `1` in `UserDefaults` is supposed to represent `true` or actually `1` without your input. Read the `migrate` function documentation for other important details!
+
+### Custom Logging
+
+TinyStorage logs via `OSLog` by default, but you can inject your own logger by conforming to `TinyStorageLogging` when you initialize the store.
+
+```swift
+struct ConsoleLogger: TinyStorageLogging {
+    func log(_ level: TinyStorageLogLevel, _ message: String, file: String, function: String, line: Int) {
+        print("[\(file)#\(line) \(function)] \(level): \(message)")
+    }
+}
+
+let storage = TinyStorage(
+    insideDirectory: FileManager.default.temporaryDirectory,
+    name: "custom-logging",
+    logger: ConsoleLogger()
+)
+```
 
 If you want to migrate multiple keys manually or store a bunch of things at once, rather than a bunch of single `store` calls you can consolidate them into one call with `bulkStore` which will only write to disk the once:
 
