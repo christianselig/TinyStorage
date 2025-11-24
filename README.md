@@ -32,7 +32,9 @@ TinyStorage is still in flux/active development, so APIs might change and there'
 - Uses `NSFileCoordinator` for coordinating reading/writing to disk so can be used safely across multiple processes at the same time (main target and widget target, for instance)
 - When using across multiple processes, will automatically detect changes to file on disk and update accordingly
 - SwiftUI property wrapper for easy use in a SwiftUI hierarchy (Similar to `@AppStorage`)
-- Can subscribe to to `TinyStorage.didChangeNotification` in `NotificationCenter`
+- Can subscribe to `TinyStorage.didChangeNotification` in `NotificationCenter`; `userInfo[ TinyStorage.changedKeysUserInfoKey ]` contains an array of changed key strings so observers can react selectively
+- Notifications also include `TinyStorage.writeIDUserInfoKey` so callers can tag writes and ignore their own change notifications (useful for sync loops)
+- No-op writes are skipped: if the encoded bytes for a key are identical to what’s already stored, TinyStorage avoids rewriting to disk and won’t emit a change notification for that key
 - Uses `OSLog` for logging
 - A function to migrate your `UserDefaults` instance to `TinyStorage`
 

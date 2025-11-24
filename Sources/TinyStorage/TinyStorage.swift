@@ -19,6 +19,8 @@ import OSLog
 /// - Internally data is stored as [String: Data] where Data is expected to be Codable (otherwise will error), this is to minimize needing to unmarshal the entire top-level dictionary into Codable objects for each key request/write. We store this [String: Data] object as a binary plist to disk as [String: Data] is not JSON encodable due to Data not being JSON
 /// - Uses OSLog for logging
 /// - Uses indirect observation to propogate changes to SwiftUI, by using keySignals (which is itself observationIgnored because we don't want changes to one key affecting other keys, so we use Observation on the KeySignal itself that it holds). This prevents internal modifications of dictionaryRepresentation (our main in-memory store) from triggering code in the Observation system before we're done, which can cause re-entrancy/deadlock issues.
+///
+/// Also note that we annotate TinyStorage as `nonisolated` as in Swift 6 MainActor is default for classes, which we do not want for TinyStorage, so we undo that (and make it not isolated) by using `nonisolated` so we can continue to handle all the threading/synchronization ourselves and allow TinyStorage to be called from any thread (except for the functions explicitly marked MainActor).
 @Observable
 nonisolated public final class TinyStorage: @unchecked Sendable {
     private let directoryURL: URL
@@ -51,6 +53,8 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
     private var source: DispatchSourceFileSystemObject?
     
     public static let didChangeNotification = Notification.Name(rawValue: "com.christianselig.TinyStorage.didChangeNotification")
+    public static let changedKeysUserInfoKey = "TinyStorage.changedKeys"
+    public static let writeIDUserInfoKey = "TinyStorage.WriteIDKey"
     
     private let logger: TinyStorageLogging
     
@@ -176,12 +180,20 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         retrieve(type: Int.self, forKey: key) ?? 0
     }
 
+    /// Returns true if a value exists for the given key without decoding it.
+    ///
+    /// Useful when you only need presence information (e.g., to decide between save vs. delete) without incurring decode cost.
+    public func contains(_ key: any TinyStorageKey) -> Bool {
+        dispatchQueue.sync {
+            dictionaryRepresentation[key.rawValue] != nil
+        }
+    }
+
     /// Helper function that retrieves the object at the key and increments it before saving it back to storage and returns the newly incremented value. If no value is present at the key or there is a non `Int` value stored at the key (ensure the key was entered properly!), this function will assume you intended to initialize the value and thus write `incrementBy` to the key. If you pass a negative value to `incrementBy` it will be decremented by the absolute value of that amount.
     @discardableResult
-    public func incrementInteger(forKey key: any TinyStorageKey, by incrementBy: Int = 1) -> Int {
+    public func incrementInteger(forKey key: any TinyStorageKey, by incrementBy: Int = 1, writeID: String? = nil) -> Int {
         let keyString = key.rawValue
         var newValue: Int = 0
-        var keysToNotify: Set<String> = []
         var writeSucceeded = false
 
         dispatchQueue.sync(flags: .barrier) {
@@ -197,12 +209,16 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 newValue = currentValue + incrementBy
 
                 if let encoded = try? JSONEncoder().encode(newValue) {
+                    if dictionaryRepresentation[keyString] == encoded {
+                        // Nothing changed
+                        return
+                    }
+                    
                     dictionaryRepresentation[keyString] = encoded
                 } else {
                     dictionaryRepresentation.removeValue(forKey: keyString)
                 }
 
-                keysToNotify = [keyString]
                 writeSucceeded = true
                 return
             }
@@ -259,13 +275,21 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 }()
 
                 let updatedValue = currentValue + incrementBy
-
+                let encoded: Data
+                
                 do {
-                    mergedDictionary[keyString] = try JSONEncoder().encode(updatedValue)
+                    encoded = try JSONEncoder().encode(updatedValue)
                 } catch {
                     log(.error, "Failed to encode incremented value for key: \(keyString) with error: \(error)")
                     return
                 }
+                
+                // Skip when value didn't actually change
+                if mergedDictionary[keyString] == encoded {
+                    return
+                }
+
+                mergedDictionary[keyString] = encoded
 
                 let data: Data
 
@@ -299,7 +323,6 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 }
 
                 newValue = updatedValue
-                keysToNotify = [keyString]
                 writeSucceeded = true
             }
 
@@ -308,9 +331,9 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
             }
         }
 
-        if writeSucceeded && !keysToNotify.isEmpty {
+        if writeSucceeded {
             Task(priority: .userInitiated) { @MainActor in
-                notifyKeysChanged(keysToNotify)
+                notifyKeysChanged([keyString], writeID: writeID)
             }
         }
 
@@ -322,10 +345,11 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
     /// - Parameters:
     ///   - value: The `Codable`-conforming instance to store.
     ///   - key: The key that the value will be stored at.
-    public func storeOrThrow(_ value: Codable?, forKey key: any TinyStorageKey) throws {
+    public func storeOrThrow(_ value: Codable?, forKey key: any TinyStorageKey, writeID: String? = nil) throws {
         let keyString = key.rawValue
         
         let valueData: Data?
+        
         if let value {
             if let data = value as? Data {
                 valueData = data
@@ -345,7 +369,12 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         
         // NSFileCoordinator brief overview: we use dispatchQueue to synchronize access for this process, and NSFileCoordinator to synchronize access *across* processes. Because of this, we wait until we get the go-ahead from NSFileCoordinator before doing anything, AND we read back the changes inside, in case anything changed from other processes in the time between asking for the lock and receiving it
         dispatchQueue.sync(flags: .barrier) {
-            guard !Self.isBeingUsedInXcodePreview else {
+            if Self.isBeingUsedInXcodePreview {
+                // If the encoded bytes are identical, that means we're not changing the value so just return
+                if dictionaryRepresentation[key.rawValue] == valueData {
+                    return
+                }
+                
                 dictionaryRepresentation[key.rawValue] = valueData
                 writeSucceeded = true
                 return
@@ -394,6 +423,11 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 } else {
                     mergedDictionary.removeValue(forKey: keyString)
                 }
+                
+                // Skip disk write and notification if the encoded bytes are unchanged
+                if existingDictionary[keyString] == valueData {
+                    return
+                }
 
                 let data: Data
                 
@@ -437,7 +471,7 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         guard writeSucceeded else { return }
         
         Task(priority: .userInitiated) { @MainActor in
-            notifyKeysChanged([keyString])
+            notifyKeysChanged([keyString], writeID: writeID)
         }
     }
     
@@ -446,21 +480,21 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
     /// - Parameters:
     ///   - value: The `Codable`-conforming instance to store.
     ///   - key: The key that the value will be stored at.
-    public func store(_ value: Codable?, forKey key: any TinyStorageKey) {
+    public func store(_ value: Codable?, forKey key: any TinyStorageKey, writeID: String? = nil) {
         do {
-            try storeOrThrow(value, forKey: key)
+            try storeOrThrow(value, forKey: key, writeID: writeID)
         } catch {
             log(.error, "Error storing key: \(key.rawValue), with error: \(error)")
         }
     }
     
     /// Removes the value for the given key
-    public func remove(key: any TinyStorageKey) {
-        store(nil, forKey: key)
+    public func remove(key: any TinyStorageKey, writeID: String? = nil) {
+        store(nil, forKey: key, writeID: writeID)
     }
     
     /// Completely resets the storage, removing all values
-    public func reset() {
+    public func reset(writeID: String? = nil) {
         guard !Self.isBeingUsedInXcodePreview else { return }
         
         var keysToNotify: Set<String> = []
@@ -501,7 +535,7 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         
         if !resetFailed && !keysToNotifyCopy.isEmpty {
             Task(priority: .userInitiated) { @MainActor in
-                self.notifyKeysChanged(keysToNotifyCopy)
+                notifyKeysChanged(keysToNotifyCopy, writeID: writeID)
             }
         }
     }
@@ -525,7 +559,7 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
     /// 7. If a value that is intended to be a `Double` is encoded as an `Int` (for instance, it just happens to be `6.0` at time of migration and it thus stored as an `Int`), this is not of concern as you can still retrieve this as a `Double` after the fact.
     /// 8. This function could theoretically fetch all the keys in `UserDefaults`, but `UserDefaults` stores a lot of data that Apple/iOS put in there that doesn't necessarily pertain to your app/need to be stored in `TinyStorage`, so it's required that you pass a set of keys for the keys you want to migrate.
     /// 9. `UserDefaults` has functions `integer/double(forKey:)` and a corresponding `Bool` method that return `0` and `false` respectively if no key is present (as does TinyStorage) but as part of migration TinyStorage will not store 0/false, for the value if the key is not present, it will simply return skip the key, storing nothing for it.
-    public func migrate(userDefaults: UserDefaults, nonBoolKeys: Set<String>, boolKeys: Set<String>, overwriteTinyStorageIfConflict: Bool) {
+    public func migrate(userDefaults: UserDefaults, nonBoolKeys: Set<String>, boolKeys: Set<String>, overwriteTinyStorageIfConflict: Bool, writeID: String? = nil) {
         guard !Self.isBeingUsedInXcodePreview else { return }
   
         var preparedItems: [String: Data] = [:]
@@ -543,7 +577,6 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         }
         
         var keysToNotify: Set<String> = []
-        var writeSucceeded = false
         
         dispatchQueue.sync(flags: .barrier) {
             let coordinator = NSFileCoordinator()
@@ -587,8 +620,18 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 for (key, value) in preparedItems {
                     guard !shouldSkipKeyDuringMigration(key: key, overwriteTinyStorageIfConflict: overwriteTinyStorageIfConflict, existingDictionary: existingDictionary) else { continue }
 
+                    // Skip no-op writes where the encoded bytes are identical
+                    if existingDictionary[key] == value {
+                        continue
+                    }
+
                     mergedDictionary[key] = value
                     localKeysToNotify.insert(key)
+                }
+                
+                // If nothing actually changed, skip disk write/notification
+                if localKeysToNotify.isEmpty {
+                    return
                 }
                                 
                 let data: Data
@@ -609,7 +652,6 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 
                 dictionaryRepresentation = mergedDictionary
 
-
                 do {
                     let resourceValues = try url.resourceValues(forKeys: [.generationIdentifierKey])
                     
@@ -624,7 +666,6 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 }
 
                 keysToNotify = localKeysToNotify
-                writeSucceeded = true
                 log(.info, "Completed migration")
             }
             
@@ -633,9 +674,9 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
             }
         }
         
-        if writeSucceeded && !keysToNotify.isEmpty {
+        if !keysToNotify.isEmpty {
             Task(priority: .userInitiated) { @MainActor in
-                notifyKeysChanged(keysToNotify)
+                notifyKeysChanged(keysToNotify, writeID: writeID)
             }
         }
     }
@@ -647,9 +688,8 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
     ///   - skipKeyIfAlreadyPresent: If `true` (default value is `false`) and the key is already present in the existing store, the new value will not be stored. This turns this function into something akin to `UserDefaults`' `registerDefaults` function, handy for setting up initial values, such as a guess at a user's preferred temperature unit (Celisus or Fahrenheit) based on device locale.
     ///
     /// - Note: From what I understand Codable is already inherently optional due to Optional being Codable so this just makes it more explicit to the compiler so we can unwrap it easier, in other words there's no way to make it so folks can't pass in non-optional Codables when used as an existential (see: https://mastodon.social/@christianselig/113279213464286112)
-    public func bulkStore<U: TinyStorageKey>(items: [U: (any Codable)?], skipKeyIfAlreadyPresent: Bool = false) {
+    public func bulkStore<U: TinyStorageKey>(items: [U: (any Codable)?], skipKeyIfAlreadyPresent: Bool = false, writeID: String? = nil) {
         var keysToNotify: Set<String> = []
-        var writeSucceeded = false
         
         dispatchQueue.sync(flags: .barrier) {
             let coordinator = NSFileCoordinator()
@@ -700,12 +740,24 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                             }
                         }
                         
+                        // Skip no-op writes where the encoded bytes are identical
+                        if mergedDictionary[rawKey] == encoded {
+                            continue
+                        }
+                        
                         mergedDictionary[rawKey] = encoded
+                        localKeysToNotify.insert(rawKey)
                     } else {
-                        mergedDictionary.removeValue(forKey: rawKey)
+                        // This is a delete, but only mark as changed if the key actually existed
+                        if mergedDictionary.removeValue(forKey: rawKey) != nil {
+                            localKeysToNotify.insert(rawKey)
+                        }
                     }
-                    
-                    localKeysToNotify.insert(rawKey)
+                }
+
+                // If nothing actually changed, exit early
+                if localKeysToNotify.isEmpty {
+                    return
                 }
 
                 let data: Data
@@ -740,7 +792,6 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
                 }
 
                 keysToNotify = localKeysToNotify
-                writeSucceeded = true
             }
             
             if let coordinatorError {
@@ -750,9 +801,9 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         
         let keysToNotifyCopy = keysToNotify
         
-        if writeSucceeded && !keysToNotifyCopy.isEmpty {
+        if !keysToNotifyCopy.isEmpty {
             Task(priority: .userInitiated) { @MainActor in
-                notifyKeysChanged(keysToNotifyCopy)
+                notifyKeysChanged(keysToNotifyCopy, writeID: writeID)
             }
         }
     }
@@ -808,7 +859,9 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
     }
     
     @MainActor
-    private func notifyKeysChanged(_ keys: Set<String>) {
+    private func notifyKeysChanged(_ keys: Set<String>, writeID: String? = nil) {
+        guard !keys.isEmpty else { return }
+        
         var changesOccurred = false
         
         for key in keys {
@@ -817,7 +870,17 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         }
         
         if changesOccurred {
-            NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: nil)
+            var userInfo: [AnyHashable: Any] = [Self.changedKeysUserInfoKey: Array(keys)]
+            
+            if let writeID {
+                userInfo[Self.writeIDUserInfoKey] = writeID
+            }
+            
+            NotificationCenter.default.post(
+                name: Self.didChangeNotification,
+                object: self,
+                userInfo: userInfo
+            )
         }
     }
         
@@ -1033,7 +1096,6 @@ nonisolated public final class TinyStorage: @unchecked Sendable {
         let keysToNotifyCopy = keysToNotify
         
         if !keysToNotifyCopy.isEmpty {
-            // Might not *technically* be user initiated but it immediately drives user UI so seems like a safe call
             Task(priority: .userInitiated) { @MainActor in
                 notifyKeysChanged(keysToNotifyCopy)
             }
